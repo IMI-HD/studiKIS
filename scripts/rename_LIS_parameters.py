@@ -55,53 +55,78 @@ def update_fsn_only(df):
             concept_data = response.json()
             names_list = concept_data.get('names', [])
             
-            # 2. Den FSN in der Liste suchen
+            # 2. Den FSN und Short Name in der Liste suchen
             fsn_uuid = None
             current_fsn_name = None
+            short_uuid = None
+            current_short_name = None
             
             for n in names_list:
-                # Wir suchen explizit nach dem Typ FULLY_SPECIFIED
-                # Optional: and n.get('locale') == 'en' hinzufügen, wenn Sie strikt sein wollen
-                if n.get('conceptNameType') == 'FULLY_SPECIFIED':
+                # Wir suchen explizit nach FSN und SHORT
+                ctype = n.get('conceptNameType')
+                if ctype == 'FULLY_SPECIFIED':
                     fsn_uuid = n.get('uuid')
-                    current_fsn_name = n.get('display') # oder n.get('name')
-                    break 
+                    current_fsn_name = n.get('display') 
+                elif ctype == 'SHORT':
+                    short_uuid = n.get('uuid')
+                    current_short_name = n.get('display')
             
             if not fsn_uuid:
                 print(f"⚠️  Warnung: Konzept {concept_uuid} hat keinen FSN (sehr ungewöhnlich).")
                 error_count += 1
                 continue
 
-            # Check: Ist der Name schon richtig?
-            if current_fsn_name == new_name:
+            # Check: Ist etwas zu tun?
+            fsn_needs_update = (current_fsn_name != new_name)
+            # Short Name nur updaten wenn er existiert und anders ist
+            short_needs_update = (short_uuid is not None and current_short_name != new_name)
+
+            if not fsn_needs_update and not short_needs_update:
                 print(f"ℹ️  Skippe: '{current_fsn_name}' ist bereits aktuell.")
                 skipped_count += 1
                 continue
-
-            print(f"🔄 Ändere FSN: '{current_fsn_name}' -> '{new_name}'")
-
-            # 3. Update Request an die spezifische Namens-UUID senden
-            update_url = f"{BASE_URL}/{concept_uuid}/name/{fsn_uuid}"
             
-            payload = {
-                "name": new_name
-            }
-            
-            update_response = requests.post(
-                update_url, 
-                json=payload, 
-                auth=AUTH, 
-                verify=VERIFY_SSL, 
-                headers={'Content-Type': 'application/json'}
-            )
+            # --- FSN Update ---
+            if fsn_needs_update:
+                print(f"🔄 Ändere FSN: '{current_fsn_name}' -> '{new_name}'")
+                update_url = f"{BASE_URL}/{concept_uuid}/name/{fsn_uuid}"
+                payload = {"name": new_name}
+                
+                update_response = requests.post(
+                    update_url, 
+                    json=payload, 
+                    auth=AUTH, 
+                    verify=VERIFY_SSL, 
+                    headers={'Content-Type': 'application/json'}
+                )
 
-            if update_response.status_code == 200:
-                print(f"   ✅ Erfolg!")
-                updated_count += 1
-            else:
-                # Häufiger Fehler: Name existiert schon bei einem anderen Konzept
-                print(f"   ❌ API Fehler: {update_response.status_code} - {update_response.text}")
-                error_count += 1
+                if update_response.status_code == 200:
+                    print(f"   ✅ FSN Erfolg!")
+                    updated_count += 1
+                else:
+                    print(f"   ❌ FSN API Fehler: {update_response.status_code} - {update_response.text}")
+                    error_count += 1
+
+            # --- Short Name Update ---
+            if short_needs_update:
+                print(f"🔄 Ändere Short Name: '{current_short_name}' -> '{new_name}'")
+                update_url = f"{BASE_URL}/{concept_uuid}/name/{short_uuid}"
+                payload = {"name": new_name}
+                
+                update_response = requests.post(
+                    update_url, 
+                    json=payload, 
+                    auth=AUTH, 
+                    verify=VERIFY_SSL, 
+                    headers={'Content-Type': 'application/json'}
+                )
+
+                if update_response.status_code == 200:
+                    print(f"   ✅ Short Name Erfolg!")
+                    updated_count += 1
+                else:
+                    print(f"   ❌ Short Name API Fehler: {update_response.status_code} - {update_response.text}")
+                    error_count += 1
         except Exception as e:
             print(f"❌ Fehler beim Update von {concept_uuid}: {str(e)}")
             error_count += 1
