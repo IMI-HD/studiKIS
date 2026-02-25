@@ -19,7 +19,6 @@ def generate_sql_for_openelis(filename):
     sql_statements.append("DECLARE")
     sql_statements.append("    start_id int;")
     sql_statements.append("BEGIN")
-    sql_statements.append("    -- Wir holen uns die aktuell höchste ID als Startpunkt")
     sql_statements.append("    SELECT COALESCE(MAX(id), 0) INTO start_id FROM clinlims.result_limits;")
     
     current_row_index = 1
@@ -39,7 +38,7 @@ def generate_sql_for_openelis(filename):
             
             # 1. Geschlecht
             gender = str(row.get(f'Gender{i}', '')).upper().strip()
-            gender_sql = f"'{gender}'" if gender in ['M', 'F'] else "NULL"
+            gender_sql = f"'{gender}'" if gender in ['M', 'F'] else ""
             
             # 2. Min Age (Sicherstellen, dass es 0 ist wenn leer/NaN)
             min_age_val = row.get(f'Age (years) min{i}')
@@ -65,7 +64,7 @@ def generate_sql_for_openelis(filename):
 
 # Datei generieren
 inserts = generate_sql_for_openelis('Laborwerte_zum_behalten_mit_Normwerten.xlsx')
-with open('insert_result_limits_v3.sql', 'w', encoding='utf-8') as f:
+with open('insert_result_limits.sql', 'w', encoding='utf-8') as f:
     f.write("\n".join(inserts))
 
 print(f"Erfolgreich {len(inserts)-5} Statements generiert. Fehlerhafte 'nan' wurden durch 0 oder Standardwerte ersetzt.")
