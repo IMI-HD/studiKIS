@@ -38,7 +38,7 @@ def generate_sql_for_openelis(filename):
             
             # 1. Geschlecht
             gender = str(row.get(f'Gender{i}', '')).upper().strip()
-            gender_sql = f"'{gender}'" if gender in ['M', 'F'] else ""
+            gender_sql = f"'{gender}'" if gender in ['M', 'F'] else "''"
             
             # 2. Min Age (Sicherstellen, dass es 0 ist wenn leer/NaN)
             min_age_val = row.get(f'Age (years) min{i}')
