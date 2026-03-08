@@ -7,7 +7,7 @@ Bahmni.Registration.customValidator = {
     },
     "Telephone Number": {
         method: function (name, value, personAttributeDetails) {
-            return value && value.length> 6;
+            return value && value.length > 6;
         },
         errorMessage: "REGISTRATION_TELEPHONE_NUMBER_ERROR_KEY"
     },
@@ -18,3 +18,9 @@ Bahmni.Registration.customValidator = {
         errorMessage: "REGISTRATION_CASTE_TEXT_ERROR_KEY"
     }
 };
+
+if (!window.kasHooked) {
+    window.kasHooked = true; setInterval(function () {
+        if (window.location.href.indexOf('/bahmni/') > -1 && document.title && !document.title.startsWith('[KAS]')) { document.title = '[KAS] ' + document.title; }
+    }, 1000);
+}
