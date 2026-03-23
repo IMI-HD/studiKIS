@@ -62,6 +62,11 @@ def delete_patient_strictly():
             cursor.execute(sql, enc_ids)
             print(f"4. Encounters gelöscht: {cursor.rowcount}")
 
+        # --- NEU: 5a. Visit Attributes (Hängen am Visit) ---
+        # Wir müssen erst die Attribute löschen, die auf die Visits des Patienten verweisen
+        cursor.execute("""DELETE FROM visit_attribute WHERE visit_id IN (SELECT visit_id FROM visit WHERE patient_id = %s)""", (patient_id,))
+        print(f"5a. Visit Attributes gelöscht: {cursor.rowcount}")
+        
         # 5. Visit (Hängt am Patient, Encounter sind weg)
         cursor.execute("DELETE FROM visit WHERE patient_id = %s", (patient_id,))
         print(f"5. Visits gelöscht: {cursor.rowcount}")
