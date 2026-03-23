@@ -36,7 +36,8 @@
                         "familyIncome",
                         "debt",
                         "cluster",
-                        "email"
+                        "email",
+                        "character_profile"
                     ]
                 },
                 "hidden": {
