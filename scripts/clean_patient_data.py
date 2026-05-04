@@ -6,12 +6,12 @@ import sys
 DB_CONFIG = {
     'user': 'openmrs-user',
     'password': 'password',  # Oder 'Admin123', je nach Ihrer .env
-    'host': 'localhost',
+    'host': 'kis-lab.mi.intern',
     'port': 3307,            # Ihr Docker-Mapping Port
     'database': 'openmrs'
 }
 
-TARGET_IDENTIFIER = '0001310848'
+TARGET_IDENTIFIER = 'ABC210002'
 
 def delete_patient_strictly():
     print(f"🔌 Verbinde mit Datenbank auf Port {DB_CONFIG['port']}...")
