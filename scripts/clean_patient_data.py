@@ -2,15 +2,13 @@ import mysql.connector
 import sys
 
 # --- KONFIGURATION ---
-# Bitte Port und Passwort prüfen (wie im vorherigen Skript)
 DB_CONFIG = {
     'user': 'openmrs-user',
-    'password': 'password',  # Oder 'Admin123', je nach Ihrer .env
-    'host': 'kis-lab.mi.intern',
-    'port': 3307,            # Ihr Docker-Mapping Port
+    'password': 'password',  
+    'host': 'localhost',
+    'port': 3307,            
     'database': 'openmrs'
 }
-
 TARGET_IDENTIFIER = 'ABC210002'
 
 def delete_patient_strictly():
@@ -47,14 +45,24 @@ def delete_patient_strictly():
             print(f"1. Encounter Provider gelöscht: {cursor.rowcount}")
 
         # 2. Observations (Hängt am Encounter & Person)
-        # Erst Kinder (Gruppen), dann Eltern löschen
-        cursor.execute("DELETE FROM obs WHERE obs_group_id IS NOT NULL AND person_id = %s", (patient_id,))
+        # Um Probleme mit zirkulären Referenzen (obs_group_id) zu vermeiden,
+        # deaktivieren wir hier explizit die Foreign Key Checks für diese session
+        cursor.execute("SET FOREIGN_KEY_CHECKS=0")
         cursor.execute("DELETE FROM obs WHERE person_id = %s", (patient_id,))
-        print(f"2. Observations gelöscht (Clean).")
+        cursor.execute("SET FOREIGN_KEY_CHECKS=1")
+        print(f"2. Observations gelöscht: {cursor.rowcount}")
 
         # 3. Conditions (Hängt am Patient)
         cursor.execute("DELETE FROM conditions WHERE patient_id = %s", (patient_id,))
         print(f"3. Conditions gelöscht: {cursor.rowcount}")
+
+        # 3.5 Orders (Hängen am Encounter & Patient)
+        cursor.execute("SET FOREIGN_KEY_CHECKS=0")
+        cursor.execute("DELETE FROM test_order WHERE order_id IN (SELECT order_id FROM orders WHERE patient_id = %s)", (patient_id,))
+        cursor.execute("DELETE FROM drug_order WHERE order_id IN (SELECT order_id FROM orders WHERE patient_id = %s)", (patient_id,))
+        cursor.execute("DELETE FROM orders WHERE patient_id = %s", (patient_id,))
+        cursor.execute("SET FOREIGN_KEY_CHECKS=1")
+        print(f"3.5 Orders gelöscht.")
 
         # 4. Encounter (Jetzt leer, kann weg)
         if enc_ids:

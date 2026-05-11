@@ -1,18 +1,22 @@
 import csv
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+import urllib3
+
+# Warnungen unterdrücken (für lokale Entwicklung mit selbstsignierten Zertifikaten)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- Konfiguration ---
-FHIR_BASE_URL = "https://kis-lab.mi.intern/openmrs/ws/fhir2/R4"
-AUTH = ('admin', 'Admin123') # TODO: Mit deinen Bahmni-Zugangsdaten ersetzen
+FHIR_BASE_URL = "https://localhost/openmrs/ws/fhir2/R4"
+AUTH = ('superman', 'Admin123') # TODO: Mit deinen Bahmni-Zugangsdaten ersetzen
 HEADERS = {'Content-Type': 'application/fhir+json', 'Accept': 'application/fhir+json'}
 VERIFY_SSL = False 
 
 # Variablen für unseren Durchlauf
 PATIENT_IDENTIFIER = "ABC210002"
 CONCEPT_UUID = "160053AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-CSV_FILE_PATH = r"C:\Users\ronja\Bahmni\KIS-Projekt\FlorianHauptmann_glucose_19-3-2026 copy.csv"
+CSV_FILE_PATH = r"F:\Workspace\Bahmni_Project\KIS-Projekt\FlorianHauptmann_glucose_19-3-2026 copy.csv"
 
 
 def get_patient_uuid(identifier):
@@ -39,19 +43,28 @@ def create_patient(identifier_value):
     
     patient_payload = {
         "resourceType": "Patient",
-        # Keine "id" mitgeben, damit der Server sie generiert!
-        "identifier": [
+        # "id": "e5454f04-256d-0de3-0717-03556904d434", # Bei POST darf/muss die ID vom Server generiert werden
+         "identifier":[ 
             {
-                "use": "official",
-                "type": {
-                    "coding": [
-                        {
-                            "code": "d3153eb0-5e07-11ef-8f7c-0242ac120002"
-                        }
-                    ],
-                    "text": "Patient Identifier"
-                },
-                "value": identifier_value
+            "extension": [
+                {
+                "url": "http://fhir.openmrs.org/ext/patient/identifier#location",
+                "valueReference": {
+                    "reference": "Location/92ab9667-4686-49af-8be8-65a4b58fc49c",
+                    "type": "Location"
+                }
+                }
+            ],
+            "use": "official",
+            "type": {
+                "coding": [
+                {
+                    "code": "d3153eb0-5e07-11ef-8f7c-0242ac120002"
+                }
+                ],
+                "text": "Patient Identifier"
+            },
+            "value": identifier_value
             }
         ],
         "active": True,
@@ -69,9 +82,14 @@ def create_patient(identifier_value):
         "deceasedBoolean": False
     }
     
-    response = requests.post(url, auth=AUTH, headers=HEADERS, json=patient_payload, verify=VERIFY_SSL)
+    # Wandle das Dictionary explizit in einen JSON-String um (wie im anderen Skript)
+    payload_str = json.dumps(patient_payload, ensure_ascii=False)
     
-    if response.status_code != 201:
+    # Nutze data= statt json=
+    response = requests.post(url, auth=AUTH, headers=HEADERS, data=payload_str, verify=VERIFY_SSL)
+    print(response.text)
+    
+    if response.status_code not in [200, 201]:
         raise Exception(f"Fehler beim Erstellen des Patienten: {response.text}")
         
     patient_uuid = response.json()["id"] # Hier extrahieren wir die frisch vergebene UUID!
@@ -79,12 +97,12 @@ def create_patient(identifier_value):
     return patient_uuid
 
 
-def create_encounter(patient_uuid):
-    """Erstellt einen Encounter für den Patienten."""
-    print("Erstelle Encounter...")
-    url = f"{FHIR_BASE_URL}/Encounter"
+def create_visit(patient_uuid, encounter_date_str_start, encounter_date_str_end):
+    """Erstellt einen Visit UND einen Encounter für die Verknüpfung."""
     
-    encounter_payload = {
+    # --- SCHRITT 1: VISIT ERSTELLEN ---
+    print("Erstelle Visit...")
+    visit_payload = {
         "resourceType": "Encounter",
         "status": "finished",
         "class": {
@@ -106,30 +124,76 @@ def create_encounter(patient_uuid):
             "reference": f"Patient/{patient_uuid}",
             "type": "Patient"
         },
+        # Den Zeitraum großzügig setzen, damit alle CSV-Werte abgedeckt sind
         "period": {
-            "start": "2019-06-20T12:16:55+02:00",
-            "end": "2019-06-20T12:31:55+02:00"
+            "start": encounter_date_str_start,
+            "end": encounter_date_str_end
+        }
+    }
+    
+    visit_resp = requests.post(f"{FHIR_BASE_URL}/Encounter", auth=AUTH, headers=HEADERS, json=visit_payload, verify=VERIFY_SSL)
+    visit_resp.raise_for_status()
+    visit_uuid = visit_resp.json()["id"]
+    print(f"-> Visit erstellt! UUID: {visit_uuid}")
+    return visit_uuid
+
+def create_encounter(patient_uuid, visit_uuid, encounter_date_str_start, encounter_date_str_end): 
+    # --- SCHRITT 2: ECHTEN ENCOUNTER ERSTELLEN ---
+    print("Erstelle echten Encounter im Visit...")
+    encounter_payload = {
+        "resourceType": "Encounter",
+        "status": "finished",
+        "class": {
+            "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+            "code": "AMB"
         },
+        # WICHTIG: Hier sagen wir FHIR, dass dieser Encounter ZUM VISIT gehört.
+        # Dadurch weiß OpenMRS, dass es einen 'Encounter' und keinen 'Visit' anlegen soll.
+        "type": [
+            {
+                "coding": [
+                    {
+                        "system": "http://fhir.openmrs.org/code-system/encounter-type",
+                        "code": "d3bf1623-5e07-11ef-8f7c-0242ac120002",
+                        "display": "LAB_RESULT"
+                    }
+                ]
+            }
+        ],
+        "subject": {
+            "reference": f"Patient/{patient_uuid}",
+            "type": "Patient"
+        },
+        "period": {
+            "start": encounter_date_str_start,
+            "end": encounter_date_str_end
+        },        
         "location": [
             {
                 "location": {
-                    "reference": "Location/72636eba-29bf-4d6c-97c4-4b04d87a95b5",
+                    "reference": "Location/b5da9afd-b29a-4cbf-91c9-ccf2aa5f799e",
                     "type": "Location",
-                    "display": "Bahmni Hospital"
+                    "display": "Emergency"
                 }
             }
-        ]
+        ],
+        "partOf": {
+            "reference": f"Encounter/{visit_uuid}",
+            "type": "Encounter"
+        },
+
     }
     
-    response = requests.post(url, auth=AUTH, headers=HEADERS, json=encounter_payload, verify=VERIFY_SSL)
-    response.raise_for_status()
+    enc_resp = requests.post(f"{FHIR_BASE_URL}/Encounter", auth=AUTH, headers=HEADERS, json=encounter_payload, verify=VERIFY_SSL)
+    enc_resp.raise_for_status()
+    encounter_uuid = enc_resp.json()["id"]
+    print(f"-> Echter Encounter erstellt! UUID: {encounter_uuid}")
     
-    encounter_uuid = response.json()["id"]
-    print(f"-> Encounter erfolgreich erstellt! UUID: {encounter_uuid}")
+    # Wir geben die Encounter-UUID an die Observation-Funktion weiter!
     return encounter_uuid
 
 
-def upload_observations(patient_uuid, encounter_uuid, csv_path):
+def upload_observations(patient_uuid, visit_uuid, csv_path):
     """Liest die CSV-Datei ein und postet die Glukosewerte als Observation."""
     print("Starte CSV-Verarbeitung...")
     
@@ -153,7 +217,7 @@ def upload_observations(patient_uuid, encounter_uuid, csv_path):
             raw_date = row['Gerätezeitstempel']
             parsed_date = datetime.strptime(raw_date, "%d-%m-%Y %H:%M")
             fhir_date = parsed_date.strftime("%Y-%m-%dT%H:%M:%S+00:00") 
-            
+            encounter_uuid = create_encounter(patient_uuid, visit_uuid, fhir_date, fhir_date)
             observation_payload = {
                 "resourceType": "Observation",
                 "status": "final",
@@ -166,10 +230,12 @@ def upload_observations(patient_uuid, encounter_uuid, csv_path):
                     "coding": [{"code": CONCEPT_UUID, "display": "Glucose"}]
                 },
                 "subject": {
-                    "reference": f"Patient/{patient_uuid}"
+                    "reference": f"Patient/{patient_uuid}",
+                    "type": "Patient"
                 },
                 "encounter": {
-                    "reference": f"Encounter/{encounter_uuid}"
+                    "reference": f"Encounter/{encounter_uuid}",
+                    "type": "Encounter"
                 },
                 "effectiveDateTime": fhir_date,
                 "valueQuantity": {
@@ -194,18 +260,37 @@ def upload_observations(patient_uuid, encounter_uuid, csv_path):
 
 # --- Hauptprogramm ---
 if __name__ == "__main__":
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    
     try:
         # 1. Patient suchen oder neu anlegen (Get-or-Create)
         pat_uuid = create_patient(PATIENT_IDENTIFIER)
         
-        # 2. Encounter erstellen
-        enc_uuid = create_encounter(pat_uuid)
+        # 2. CSV-Zeitraum für den Encounter ermitteln
+        with open(CSV_FILE_PATH, mode='r', encoding='utf-8-sig') as file:
+            lines = file.readlines()
+            if len(lines) < 3:
+                raise Exception("CSV-Datei ist zu kurz (Metadaten + Header + min. 1 Datenzeile erforderlich).")
+            
+            # FreeStyle Libre: Zeile 0 = Metadaten, Zeile 1 = Header
+            csv_data = lines[1:]
+            reader = list(csv.DictReader(csv_data))
+            
+            if not reader:
+                raise Exception("Keine Datenzeilen in der CSV gefunden.")
+
+            # Erster und letzter Zeitstempel aus der CSV lesen für den Encounter
+            raw_date_start = reader[0]["Gerätezeitstempel"]
+            parsed_date_start = datetime.strptime(raw_date_start, "%d-%m-%Y %H:%M") - timedelta(hours=1)
+            encounter_date_str_start = parsed_date_start.strftime("%Y-%m-%dT%H:%M:%S+00:00") 
+
+            raw_date_end = reader[-1]["Gerätezeitstempel"]
+            parsed_date_end = datetime.strptime(raw_date_end, "%d-%m-%Y %H:%M") + timedelta(hours=1)
+            encounter_date_str_end = parsed_date_end.strftime("%Y-%m-%dT%H:%M:%S+00:00") 
+
+            # Encounter erstellen
+            visit_uuid = create_visit(pat_uuid, encounter_date_str_start, encounter_date_str_end)
         
         # 3. CSV verarbeiten und Werte hochladen
-        upload_observations(pat_uuid, enc_uuid, CSV_FILE_PATH)
+        upload_observations(pat_uuid, visit_uuid, CSV_FILE_PATH)
         
     except Exception as e:
         print(f"Ein Fehler ist aufgetreten: {e}")
