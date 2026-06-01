@@ -381,7 +381,7 @@
                 "translationKey": "DASHBOARD_TITLE_DIABETES_BLOOD_SUGAR",
                 "config": {
                     "yAxisConcepts": [
-                        "Glucose measurement, serum, fasting (mmol/dL)"
+                        "Fasting blood glucose measurement (mg/dL)"
                     ],
                     "xAxisConcept": "observationDateTime"
                 },
