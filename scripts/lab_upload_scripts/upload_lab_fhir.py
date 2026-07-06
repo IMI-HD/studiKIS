@@ -3,17 +3,16 @@ import requests
 import json
 from datetime import datetime, timedelta
 import urllib3
+from tqdm import tqdm
 
-# Warnungen unterdrücken (für lokale Entwicklung mit selbstsignierten Zertifikaten)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- Konfiguration ---
-FHIR_BASE_URL = "https://localhost/openmrs/ws/fhir2/R4"
-AUTH = ('superman', 'Admin123') # TODO: Mit deinen Bahmni-Zugangsdaten ersetzen
+FHIR_BASE_URL = "https://kis-lab.mi.intern/openmrs/ws/fhir2/R4"
+AUTH = ('superman', 'Admin123') 
 HEADERS = {'Content-Type': 'application/fhir+json', 'Accept': 'application/fhir+json'}
 VERIFY_SSL = False 
 
-# Variablen für unseren Durchlauf
 PATIENT_IDENTIFIER = "ABC210002"
 CONCEPT_UUID = "160053AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 CSV_FILE_PATH = r"F:\Workspace\Bahmni_Project\KIS-Projekt\FlorianHauptmann_glucose_19-3-2026 copy.csv"
@@ -36,15 +35,14 @@ def get_patient_uuid(identifier):
     return patient_uuid
 
 
-def create_patient(identifier_value):
+def create_patient(identifier_value, family_name, given_name):
     """Erstellt einen neuen Patienten und gibt die dynamisch generierte UUID zurück."""
     print("-> Patient nicht gefunden. Erstelle neuen Patienten...")
     url = f"{FHIR_BASE_URL}/Patient"
     
     patient_payload = {
         "resourceType": "Patient",
-        # "id": "e5454f04-256d-0de3-0717-03556904d434", # Bei POST darf/muss die ID vom Server generiert werden
-         "identifier":[ 
+        "identifier":[ 
             {
             "extension": [
                 {
@@ -70,11 +68,8 @@ def create_patient(identifier_value):
         "active": True,
         "name": [
             {
-                "family": "Schmidt332",
-                "given": [
-                    "Lukas92",
-                    "Elias404"
-                ]
+                "family": family_name,
+                "given": [given_name]
             }
         ],
         "gender": "male",
@@ -85,14 +80,13 @@ def create_patient(identifier_value):
     # Wandle das Dictionary explizit in einen JSON-String um (wie im anderen Skript)
     payload_str = json.dumps(patient_payload, ensure_ascii=False)
     
-    # Nutze data= statt json=
     response = requests.post(url, auth=AUTH, headers=HEADERS, data=payload_str, verify=VERIFY_SSL)
     print(response.text)
     
     if response.status_code not in [200, 201]:
         raise Exception(f"Fehler beim Erstellen des Patienten: {response.text}")
         
-    patient_uuid = response.json()["id"] # Hier extrahieren wir die frisch vergebene UUID!
+    patient_uuid = response.json()["id"]
     print(f"-> Patient erfolgreich erstellt! Neue UUID: {patient_uuid}")
     return patient_uuid
 
@@ -101,7 +95,6 @@ def create_visit(patient_uuid, encounter_date_str_start, encounter_date_str_end)
     """Erstellt einen Visit UND einen Encounter für die Verknüpfung."""
     
     # --- SCHRITT 1: VISIT ERSTELLEN ---
-    print("Erstelle Visit...")
     visit_payload = {
         "resourceType": "Encounter",
         "status": "finished",
@@ -124,7 +117,6 @@ def create_visit(patient_uuid, encounter_date_str_start, encounter_date_str_end)
             "reference": f"Patient/{patient_uuid}",
             "type": "Patient"
         },
-        # Den Zeitraum großzügig setzen, damit alle CSV-Werte abgedeckt sind
         "period": {
             "start": encounter_date_str_start,
             "end": encounter_date_str_end
@@ -134,12 +126,10 @@ def create_visit(patient_uuid, encounter_date_str_start, encounter_date_str_end)
     visit_resp = requests.post(f"{FHIR_BASE_URL}/Encounter", auth=AUTH, headers=HEADERS, json=visit_payload, verify=VERIFY_SSL)
     visit_resp.raise_for_status()
     visit_uuid = visit_resp.json()["id"]
-    print(f"-> Visit erstellt! UUID: {visit_uuid}")
     return visit_uuid
 
 def create_encounter(patient_uuid, visit_uuid, encounter_date_str_start, encounter_date_str_end): 
     # --- SCHRITT 2: ECHTEN ENCOUNTER ERSTELLEN ---
-    print("Erstelle echten Encounter im Visit...")
     encounter_payload = {
         "resourceType": "Encounter",
         "status": "finished",
@@ -147,8 +137,6 @@ def create_encounter(patient_uuid, visit_uuid, encounter_date_str_start, encount
             "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
             "code": "AMB"
         },
-        # WICHTIG: Hier sagen wir FHIR, dass dieser Encounter ZUM VISIT gehört.
-        # Dadurch weiß OpenMRS, dass es einen 'Encounter' und keinen 'Visit' anlegen soll.
         "type": [
             {
                 "coding": [
@@ -187,37 +175,51 @@ def create_encounter(patient_uuid, visit_uuid, encounter_date_str_start, encount
     enc_resp = requests.post(f"{FHIR_BASE_URL}/Encounter", auth=AUTH, headers=HEADERS, json=encounter_payload, verify=VERIFY_SSL)
     enc_resp.raise_for_status()
     encounter_uuid = enc_resp.json()["id"]
-    print(f"-> Echter Encounter erstellt! UUID: {encounter_uuid}")
     
-    # Wir geben die Encounter-UUID an die Observation-Funktion weiter!
     return encounter_uuid
 
 
-def upload_observations(patient_uuid, visit_uuid, csv_path):
+def upload_observations(patient_uuid, csv_path):
     """Liest die CSV-Datei ein und postet die Glukosewerte als Observation."""
     print("Starte CSV-Verarbeitung...")
+    
+    created_visits = {}
     
     with open(csv_path, mode='r', encoding='utf-8-sig') as file:
         lines = file.readlines()
         
-        # FreeStyle Libre Metadaten überspringen (Zeile 1 weglassen)
         csv_data = lines[1:]
         reader = csv.DictReader(csv_data)
+        rows = list(reader)
         
         success_count = 0
-        
-        for row in reader:
-            glukose_str = row.get('Glukosewert-Verlauf mg/dL') or row.get('Glukose-Scan mg/dL')
+        print(len(rows))
+        for row in tqdm(rows, desc="Lade Observations hoch"):
+            glukose_str = row.get('Glukosewert-Verlauf mg/dL') or row.get('Historic Glucose mg/dL')
             
             if not glukose_str or glukose_str.strip() == "":
                 continue
                 
             glukose_wert = float(glukose_str.replace(',', '.'))
             
-            raw_date = row['Gerätezeitstempel']
+            raw_date = row.get('Gerätezeitstempel') or row.get('Device Timestamp')
             parsed_date = datetime.strptime(raw_date, "%d-%m-%Y %H:%M")
             fhir_date = parsed_date.strftime("%Y-%m-%dT%H:%M:%S+00:00") 
-            encounter_uuid = create_encounter(patient_uuid, visit_uuid, fhir_date, fhir_date)
+            
+            # Bestimme den 24h-Visit-Zeitraum für diesen Kalendertag
+            visit_start = datetime(parsed_date.year, parsed_date.month, parsed_date.day)
+            visit_end = visit_start + timedelta(days=1)
+            visit_key = visit_start.strftime("%Y-%m-%d")
+            
+            if visit_key not in created_visits:
+                visit_start_str = visit_start.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+                visit_end_str = visit_end.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+                v_uuid = create_visit(patient_uuid, visit_start_str, visit_end_str)
+                created_visits[visit_key] = v_uuid
+            else:
+                v_uuid = created_visits[visit_key]
+                
+            encounter_uuid = create_encounter(patient_uuid, v_uuid, fhir_date, fhir_date)
             observation_payload = {
                 "resourceType": "Observation",
                 "status": "final",
@@ -253,44 +255,25 @@ def upload_observations(patient_uuid, visit_uuid, csv_path):
                 success_count += 1
                 # print(f"Erfolg: {glukose_wert} mg/dL am {fhir_date} gespeichert.")
             else:
-                print(f"Fehler bei {raw_date}: Code {response.status_code} - {response.text}")
+                tqdm.write(f"Fehler bei {raw_date}: Code {response.status_code} - {response.text}")
                 
     print(f"-> Fertig! {success_count} Glukose-Werte wurden erfolgreich importiert.")
 
 
-# --- Hauptprogramm ---
 if __name__ == "__main__":
+    PATIENT_IDENTIFIER = "LAB000003"
+    CONCEPT_UUID = "160912AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    CSV_FLORIAN = r"Florian_Hauptmann_glucose_19-3-2026_3d.csv"
+    CSV_ROBIN = r"Robin_Hefner_glucose_19-3-2026_3d.csv"
+    CSV_PHILIPPA = r"Philippa_Lantwin_glucose_19-3-2026_3d.csv"
+    FAMILY_NAME = CSV_PHILIPPA.split('_')[1]
+    GIVEN_NAME = CSV_PHILIPPA.split('_')[0]
     try:
         # 1. Patient suchen oder neu anlegen (Get-or-Create)
-        pat_uuid = create_patient(PATIENT_IDENTIFIER)
+        pat_uuid = create_patient(PATIENT_IDENTIFIER, FAMILY_NAME, GIVEN_NAME)
         
-        # 2. CSV-Zeitraum für den Encounter ermitteln
-        with open(CSV_FILE_PATH, mode='r', encoding='utf-8-sig') as file:
-            lines = file.readlines()
-            if len(lines) < 3:
-                raise Exception("CSV-Datei ist zu kurz (Metadaten + Header + min. 1 Datenzeile erforderlich).")
-            
-            # FreeStyle Libre: Zeile 0 = Metadaten, Zeile 1 = Header
-            csv_data = lines[1:]
-            reader = list(csv.DictReader(csv_data))
-            
-            if not reader:
-                raise Exception("Keine Datenzeilen in der CSV gefunden.")
-
-            # Erster und letzter Zeitstempel aus der CSV lesen für den Encounter
-            raw_date_start = reader[0]["Gerätezeitstempel"]
-            parsed_date_start = datetime.strptime(raw_date_start, "%d-%m-%Y %H:%M") - timedelta(hours=1)
-            encounter_date_str_start = parsed_date_start.strftime("%Y-%m-%dT%H:%M:%S+00:00") 
-
-            raw_date_end = reader[-1]["Gerätezeitstempel"]
-            parsed_date_end = datetime.strptime(raw_date_end, "%d-%m-%Y %H:%M") + timedelta(hours=1)
-            encounter_date_str_end = parsed_date_end.strftime("%Y-%m-%dT%H:%M:%S+00:00") 
-
-            # Encounter erstellen
-            visit_uuid = create_visit(pat_uuid, encounter_date_str_start, encounter_date_str_end)
-        
-        # 3. CSV verarbeiten und Werte hochladen
-        upload_observations(pat_uuid, visit_uuid, CSV_FILE_PATH)
+        # 2. CSV verarbeiten und Werte hochladen
+        upload_observations(pat_uuid, CSV_PHILIPPA)
         
     except Exception as e:
         print(f"Ein Fehler ist aufgetreten: {e}")

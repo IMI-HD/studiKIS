@@ -5,11 +5,11 @@ import sys
 DB_CONFIG = {
     'user': 'openmrs-user',
     'password': 'password',  
-    'host': 'localhost',
+    'host': 'kis-lab.mi.intern',
     'port': 3307,            
     'database': 'openmrs'
 }
-TARGET_IDENTIFIER = 'ABC210002'
+TARGET_IDENTIFIER = 'LAB000003'
 
 def delete_patient_strictly():
     print(f"🔌 Verbinde mit Datenbank auf Port {DB_CONFIG['port']}...")
@@ -49,8 +49,9 @@ def delete_patient_strictly():
         # deaktivieren wir hier explizit die Foreign Key Checks für diese session
         cursor.execute("SET FOREIGN_KEY_CHECKS=0")
         cursor.execute("DELETE FROM obs WHERE person_id = %s", (patient_id,))
+        deleted_obs = cursor.rowcount
         cursor.execute("SET FOREIGN_KEY_CHECKS=1")
-        print(f"2. Observations gelöscht: {cursor.rowcount}")
+        print(f"2. Observations gelöscht: {deleted_obs}")
 
         # 3. Conditions (Hängt am Patient)
         cursor.execute("DELETE FROM conditions WHERE patient_id = %s", (patient_id,))
@@ -63,6 +64,10 @@ def delete_patient_strictly():
         cursor.execute("DELETE FROM orders WHERE patient_id = %s", (patient_id,))
         cursor.execute("SET FOREIGN_KEY_CHECKS=1")
         print(f"3.5 Orders gelöscht.")
+
+        # 3.8 Bed Patient Assignment Map (Hängt am Patient & Encounter)
+        cursor.execute("DELETE FROM bed_patient_assignment_map WHERE patient_id = %s", (patient_id,))
+        print(f"3.8 Bed Patient Assignment Map gelöscht: {cursor.rowcount}")
 
         # 4. Encounter (Jetzt leer, kann weg)
         if enc_ids:
@@ -87,6 +92,10 @@ def delete_patient_strictly():
         # Muss vor der Tabelle 'patient' gelöscht werden
         cursor.execute("DELETE FROM audit_log WHERE patient_id = %s", (patient_id,))
         print(f"7. Audit Logs gelöscht: {cursor.rowcount}")
+
+        # --- NEU: 7.5 Allergy (Hängt am Patient) ---
+        cursor.execute("DELETE FROM allergy WHERE patient_id = %s", (patient_id,))
+        print(f"7.5 Allergies gelöscht: {cursor.rowcount}")
 
         # 8. Patient (Hängt an Person)
         cursor.execute("DELETE FROM patient WHERE patient_id = %s", (patient_id,))

@@ -10,6 +10,9 @@ import time
 import datetime
 from bs4 import BeautifulSoup
 
+# This Script mimics the manual LAB value import in Bahmni by simulating the URL Calls the user would make 
+# when clicking on all buttons
+
 # Konfiguration
 ELIS_BASE_URL = "https://localhost/openelis"
 LOGIN_ACTION_URL = f"{ELIS_BASE_URL}/ValidateLogin.do?ID=null&startingRecNo=1"
