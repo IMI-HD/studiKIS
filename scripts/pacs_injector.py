@@ -3,7 +3,7 @@ import json
 import time
 import glob
 from pydicom import dcmread
-from pydicom.uid import generate_uid, ImplicitVRLittleEndian
+from pydicom.uid import generate_uid
 from pynetdicom import AE
 from PIL import Image
 
@@ -102,11 +102,14 @@ def process_json_trigger(file_path):
         ds.SamplesPerPixel = 1
         ds.PhotometricInterpretation = "MONOCHROME2"
         
+        # Auf 1 Frame reduzieren (falls das Template Multi-Frame war)
+        ds.NumberOfFrames = 1
+        for attr in ['FrameTime', 'FrameTimeVector', 'FrameIncrementPointer']:
+            if hasattr(ds, attr):
+                delattr(ds, attr)
+        
         if 'PlanarConfiguration' in ds:
             del ds.PlanarConfiguration
-            
-        # Explizit unkomprimierten Transfer-Syntax setzen
-        ds.file_meta.TransferSyntaxUID = ImplicitVRLittleEndian
     except Exception as img_err:
         print(f"[X] FEHLER bei der PNG-Konvertierung: {img_err}")
         os.remove(file_path)
@@ -163,4 +166,10 @@ while True:
             process_json_trigger(json_file)
         except Exception as e:
             print(f"[X] Kritischer Fehler bei der Verarbeitung: {e}")
+            if os.path.exists(json_file):
+                try:
+                    os.remove(json_file)
+                    print("[*] Trigger-Datei nach kritischem Fehler bereinigt.")
+                except Exception as del_err:
+                    print(f"[X] Konnte Trigger-Datei nicht loeschen: {del_err}")
     time.sleep(1) # Jede Sekunde nach neuen JSON-Dateien suchen
