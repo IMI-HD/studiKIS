@@ -11,7 +11,7 @@ DB_CONFIG = {
 }
 TARGET_IDENTIFIER = 'LAB000003'
 
-def delete_patient_strictly():
+def delete_patient_strictly(identifier=TARGET_IDENTIFIER):
     print(f"🔌 Verbinde mit Datenbank auf Port {DB_CONFIG['port']}...")
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
@@ -21,7 +21,7 @@ def delete_patient_strictly():
 
     try:
         # 1. IDs sammeln
-        cursor.execute("SELECT patient_id FROM patient_identifier WHERE identifier = %s", (TARGET_IDENTIFIER,))
+        cursor.execute("SELECT patient_id FROM patient_identifier WHERE identifier = %s", (identifier,))
         row = cursor.fetchone()
         if not row: 
             print("❌ Patient nicht gefunden.")
@@ -122,4 +122,7 @@ def delete_patient_strictly():
         if conn: conn.close()
 
 if __name__ == "__main__":
-    delete_patient_strictly()
+    target = TARGET_IDENTIFIER
+    if len(sys.argv) > 1:
+        target = sys.argv[1]
+    delete_patient_strictly(target)
