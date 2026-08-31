@@ -10,6 +10,8 @@ import json
 import datetime
 import urllib.parse
 import time
+import re
+from bs4 import BeautifulSoup
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -124,6 +126,19 @@ def collect_all_samples_rest(accession_number, test_configurations, sample_id):
     response = requests.get(url, params=params, auth=AUTH, verify=False)
     return response.status_code == 200
 
+def get_test_name(test_id):
+    query = "SELECT name FROM clinlims.test WHERE id = %s"
+    try:
+        with psycopg2.connect(**DB_SETTINGS) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (test_id,))
+                row = cur.fetchone()
+                if row and row[0]:
+                    return row[0]
+    except Exception:
+        pass
+    return f"Test {test_id}"
+
 def get_analysis_id(sample_id, test_id):
     query = "SELECT a.id FROM analysis a JOIN sample_item si ON a.sampitem_id = si.id WHERE si.samp_id = %s AND a.test_id = %s;"
     with psycopg2.connect(**DB_SETTINGS) as conn:
@@ -218,12 +233,51 @@ def generate_gaussian_value_from_range(normal_range, fallback_min=10, fallback_m
     # Fall 4: Kein gültiger Bereich gefunden -> Fallback
     return str(random.randint(fallback_min, fallback_max))
 
-def submit_test_result(session, analysis_id, test_id, result_value, accession_number, sample_type_name, result_limit_id=""):
+def parse_accession_results_page(html_text):
+    """
+    Parst die AccessionResults.do Seite und ermittelt für jeden Index [1], [2], ...
+    die von OpenELIS vorgegebene Reihenfolge und IDs (analysisId, testId, resultLimitId).
+    """
+    tests_by_index = {}
+    
+    # 1. BeautifulSoup Parsing
+    try:
+        soup = BeautifulSoup(html_text, 'html.parser')
+        for tag in soup.find_all(['input', 'select', 'textarea']):
+            name = tag.get('name', '')
+            if name.startswith('testResult[') and '].' in name:
+                idx_part, field = name.split('].', 1)
+                idx_str = idx_part.replace('testResult[', '')
+                if idx_str.isdigit():
+                    idx = int(idx_str)
+                    if idx not in tests_by_index:
+                        tests_by_index[idx] = {}
+                    tests_by_index[idx][field] = tag.get('value', '')
+    except Exception as e:
+        print(f"⚠️ BS4 Parsing Fehler: {e}")
+
+    # 2. Fallback über Regex
+    if not tests_by_index:
+        pattern = re.compile(r'name=["\']testResult\[(\d+)\]\.(\w+)["\'][^>]*value=["\']([^"\']*)["\']', re.IGNORECASE)
+        for match in pattern.finditer(html_text):
+            idx = int(match.group(1))
+            field = match.group(2)
+            val = match.group(3)
+            if idx not in tests_by_index:
+                tests_by_index[idx] = {}
+            tests_by_index[idx][field] = val
+
+    return tests_by_index
+
+def submit_test_results(session, accession_number, sample_type_name, sample_id=None, fallback_test_ids=None):
+    """
+    Lädt die Seite AccessionResults.do, liest die exakte Test-Reihenfolge von OpenELIS aus,
+    generiert die Gauß-Werte passend zu jedem Test und sendet alle Ergebnisse im Batch.
+    """
     encoded_sample_type = urllib.parse.quote(sample_type_name)
     ui_referer = f"https://localhost/openelis/AccessionResults.do?accessionNumber={accession_number}&sampleType={encoded_sample_type}&referer=LabDashboard"
     warmup_url = f"{ELIS_BASE_URL}/AccessionResults.do?accessionNumber={accession_number}&sampleType={encoded_sample_type}&referer=LabDashboard"
     
-    session.get(warmup_url, verify=False)
     session.headers.update({
         "User-Agent": "Mozilla/5.0",
         "Origin": "https://localhost",
@@ -232,46 +286,126 @@ def submit_test_result(session, analysis_id, test_id, result_value, accession_nu
     session.cookies.set("bahmni.user.location", "%7B%22name%22%3A%22Emergency%22%2C%22uuid%22%3A%22b5da9afd-b29a-4cbf-91c9-ccf2aa5f799e%22%7D", domain="localhost")
     session.cookies.set("bahmni.user", "%22superman%22", domain="localhost")
 
+    print(f"🔍 Rufe OpenELIS-Formular ab: {accession_number} ({sample_type_name})...")
+    response = session.get(warmup_url, verify=False)
+    if response.status_code != 200:
+        print(f"❌ Fehler beim Laden des Formulars: Status {response.status_code}")
+        return False
+
+    tests_by_index = parse_accession_results_page(response.text)
+    
     form_data_tuples = [
         ("searchAccession", ""),
-        ("paging.currentPage", "1"),
-        ("testResult[1].isModified", "true"),
-        ("testResult[1].analysisId", str(analysis_id)),
-        ("testResult[1].resultId", ""),
-        ("testResult[1].testId", str(test_id)),
-        ("testResult[1].technicianSignatureId", ""),
-        ("testResult[1].testKitId", ""),
-        ("testResult[1].resultLimitId", str(result_limit_id) if result_limit_id else ""),
-        ("testResult[1].resultType", "N"),
-        ("testResult[1].valid", "true"),
-        ("testResult[1].referralId", ""),
-        ("testResult[1].referralCanceled", "false"),
-        ("testResult[1].userChoicePending", "false"),
-        ("testResult[1].isReferredOutValueChanged", "false"),
-        ("totsOriginal", "0"),
-        ("testResult[1].resultValue", str(result_value)),
-        ("testResult[1].abnormal", "false"),
-        ("hideShowFlag", "hidden"),
-        ("testResult[1].note", ""),
         ("paging.currentPage", "1")
     ]
+    files = {}
+    test_count = 0
 
-    files = {
-        "testResult[1].uploadedFile": ("", "", "application/octet-stream")
-    }
+    if tests_by_index:
+        for idx in sorted(tests_by_index.keys()):
+            item = tests_by_index[idx]
+            test_id = item.get("testId")
+            analysis_id = item.get("analysisId")
+            page_limit_id = item.get("resultLimitId", "")
+            
+            if not test_id:
+                continue
+
+            test_name = get_test_name(test_id)
+            normal_range = get_test_normal_range(test_id)
+            simulated_value = generate_gaussian_value_from_range(normal_range)
+            limit_id = page_limit_id if page_limit_id else (str(normal_range.get("limit_id", "")) if normal_range else "")
+            
+            if normal_range and (normal_range.get("low_normal") is not None or normal_range.get("high_normal") is not None):
+                range_str = f"[{normal_range.get('low_normal')}, {normal_range.get('high_normal')}]"
+            else:
+                range_str = "Kein Normbereich (Fallback)"
+
+            print(f"📤 [{idx}] {test_name} (ID: {test_id}, Analysis: {analysis_id}): Wert={simulated_value} (Normbereich: {range_str}, Limit ID: {limit_id})")
+
+            form_data_tuples.extend([
+                (f"testResult[{idx}].isModified", "true"),
+                (f"testResult[{idx}].analysisId", str(analysis_id)),
+                (f"testResult[{idx}].resultId", ""),
+                (f"testResult[{idx}].testId", str(test_id)),
+                (f"testResult[{idx}].technicianSignatureId", ""),
+                (f"testResult[{idx}].testKitId", ""),
+                (f"testResult[{idx}].resultLimitId", str(limit_id)),
+                (f"testResult[{idx}].resultType", "N"),
+                (f"testResult[{idx}].valid", "true"),
+                (f"testResult[{idx}].referralId", ""),
+                (f"testResult[{idx}].referralCanceled", "false"),
+                (f"testResult[{idx}].userChoicePending", "false"),
+                (f"testResult[{idx}].isReferredOutValueChanged", "false"),
+                ("totsOriginal", "0"),
+                (f"testResult[{idx}].resultValue", str(simulated_value)),
+                (f"testResult[{idx}].abnormal", "false"),
+                (f"testResult[{idx}].referralId", ""),
+                ("hideShowFlag", "hidden"),
+                (f"testResult[{idx}].note", "")
+            ])
+            files[f"testResult[{idx}].uploadedFile"] = ("", "", "application/octet-stream")
+            test_count += 1
+    else:
+        # Fallback falls Formular-Parsing keine Felder liefert
+        print("⚠️ Formularfelder konnten nicht direkt geparst werden, nutze Fallback-IDs...")
+        if fallback_test_ids and sample_id:
+            for idx, test_id in enumerate(fallback_test_ids, start=1):
+                analysis_id = get_analysis_id(sample_id, test_id)
+                if not analysis_id:
+                    continue
+                test_name = get_test_name(test_id)
+                normal_range = get_test_normal_range(test_id)
+                simulated_value = generate_gaussian_value_from_range(normal_range)
+                limit_id = str(normal_range.get("limit_id", "")) if normal_range else ""
+                
+                print(f"📤 [{idx}] {test_name} (ID: {test_id}, Analysis: {analysis_id}): Wert={simulated_value}")
+
+                form_data_tuples.extend([
+                    (f"testResult[{idx}].isModified", "true"),
+                    (f"testResult[{idx}].analysisId", str(analysis_id)),
+                    (f"testResult[{idx}].resultId", ""),
+                    (f"testResult[{idx}].testId", str(test_id)),
+                    (f"testResult[{idx}].technicianSignatureId", ""),
+                    (f"testResult[{idx}].testKitId", ""),
+                    (f"testResult[{idx}].resultLimitId", limit_id),
+                    (f"testResult[{idx}].resultType", "N"),
+                    (f"testResult[{idx}].valid", "true"),
+                    (f"testResult[{idx}].referralId", ""),
+                    (f"testResult[{idx}].referralCanceled", "false"),
+                    (f"testResult[{idx}].userChoicePending", "false"),
+                    (f"testResult[{idx}].isReferredOutValueChanged", "false"),
+                    ("totsOriginal", "0"),
+                    (f"testResult[{idx}].resultValue", str(simulated_value)),
+                    (f"testResult[{idx}].abnormal", "false"),
+                    (f"testResult[{idx}].referralId", ""),
+                    ("hideShowFlag", "hidden"),
+                    (f"testResult[{idx}].note", "")
+                ])
+                files[f"testResult[{idx}].uploadedFile"] = ("", "", "application/octet-stream")
+                test_count += 1
+
+    if test_count == 0:
+        print("❌ Keine Tests zum Senden gefunden.")
+        return False
+
+    form_data_tuples.append(("paging.currentPage", "1"))
 
     post_url = f"{ELIS_BASE_URL}/AccessionResultsUpdate.do?referer=LabDashboard"
     req = Request('POST', post_url, data=form_data_tuples, files=files)
     prepared = session.prepare_request(req)
 
     try:
-        response = session.send(prepared, verify=False, timeout=10)
-        if response.status_code == 200:
-            print(f"✅ Ergebnis {result_value} für Test ID {test_id} (Analysis {analysis_id}) verbucht!")
+        send_response = session.send(prepared, verify=False, timeout=10)
+        if send_response.status_code == 200:
+            print(f"✅ {test_count} Laborwert(e) für {sample_type_name} (Accession {accession_number}) erfolgreich verbucht!")
+            return True
         else:
-            print(f"❌ Fehler beim Senden für Test ID {test_id}: Status {response.status_code}")
+            print(f"❌ Fehler beim Senden für {sample_type_name}: Status {send_response.status_code}")
+            return False
     except Exception as e:
         print(f"Sende-Fehler: {e}")
+        return False
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
@@ -301,23 +435,16 @@ if __name__ == "__main__":
         # Alle Tests der Probe bei OpenELIS initialisieren
         collect_all_samples_rest(accession_number, test_configurations, sample_id)
 
-        # Über JEDEN einzelnen Test iterieren
+        # Über JEDE Probenart / Konfiguration iterieren
         for config in test_configurations:
             sample_type_id = config['sample_type_id']
             sample_type_name = get_sample_type_name(sample_type_id)
             
-            for test_id in config['test_ids']:
-                analysis_id = get_analysis_id(sample_id, test_id)
-                
-                if analysis_id:
-                    normal_range = get_test_normal_range(test_id)
-                    simulated_value = generate_gaussian_value_from_range(normal_range)
-                    limit_id = normal_range.get("limit_id", "") if normal_range else ""
-                    
-                    if normal_range and (normal_range.get("low_normal") is not None or normal_range.get("high_normal") is not None):
-                        range_str = f"[{normal_range.get('low_normal')}, {normal_range.get('high_normal')}]"
-                    else:
-                        range_str = "Kein Normbereich (Fallback)"
-                        
-                    print(f"📤 Sende Wert {simulated_value} (Normbereich: {range_str}) für Test ID {test_id} ({sample_type_name})...")
-                    submit_test_result(session, analysis_id, test_id, simulated_value, accession_number, sample_type_name, limit_id)
+            print(f"🚀 Verbuche Laborwerte für {sample_type_name} (Accession {accession_number})...")
+            submit_test_results(
+                session=session, 
+                accession_number=accession_number, 
+                sample_type_name=sample_type_name, 
+                sample_id=sample_id, 
+                fallback_test_ids=config['test_ids']
+            )
