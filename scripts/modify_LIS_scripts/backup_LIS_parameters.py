@@ -18,7 +18,7 @@ VERIFY_SSL = False
 
 def get_to_keep_laboratory_orders():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(script_dir, 'Laborwerte_zum_behalten.xlsx')
+    file_path = os.path.join(script_dir, 'Laborwerte_zum_behalten_mit_Normwerten.xlsx')
     df = pd.read_excel(file_path)
     df = df.dropna()
     return df
@@ -209,21 +209,12 @@ def restore_from_backup(filename):
     print("\n✅ Wiederherstellung abgeschlossen.")
 
 
-def hide_obsolete_laboratory_orders(to_keep_laboratory_orders_df, all_laboratory_orders):
-    for uuid, name in all_laboratory_orders.items():
-        if uuid == "165981AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA":
-            if uuid in to_keep_laboratory_orders_df['UUID'].values:
-                continue
-            print(f"Hide {name} ({uuid})...")
-            stop
-            retire_concept(uuid)
-
 
 if __name__ == "__main__":
-    # lab_samples_set_members = get_lab_samples_set_members()
-    # save_backup_to_file(lab_samples_set_members, "backup_lab_samples_set_members")
-    # all_laboratory_orders = get_laboratory_orders(lab_samples_set_members)
-    # save_backup_to_file(all_laboratory_orders, "backup_all_lab_orders") # --> Saves the original state of all set members of all laboratory orders
+    lab_samples_set_members = get_lab_samples_set_members()
+    save_backup_to_file(lab_samples_set_members, "backup_lab_samples_set_members")
+    all_laboratory_orders = get_laboratory_orders(lab_samples_set_members)
+    save_backup_to_file(all_laboratory_orders, "backup_all_lab_orders") # --> Saves the original state of all set members of all laboratory orders
 
-    restore_from_backup("backup_lab_samples_set_members_original_state.json")
-    restore_from_backup("backup_all_lab_orders_original_state.json")
+    # restore_from_backup("backup_lab_samples_set_members_original_state.json")
+    # restore_from_backup("backup_all_lab_orders_original_state.json")
