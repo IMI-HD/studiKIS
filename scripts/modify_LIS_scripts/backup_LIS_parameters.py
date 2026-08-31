@@ -116,6 +116,7 @@ def get_laboratory_orders(lab_samples_set_members):
 def save_backup_to_file(data, filename_prefix):
     """
     Speichert das Dictionary in eine JSON Datei mit Zeitstempel.
+    Erstellt den Zielordner, falls er noch nicht existiert.
     """
     if not data:
         print("❌ Keine Daten zum Speichern vorhanden.")
@@ -124,15 +125,18 @@ def save_backup_to_file(data, filename_prefix):
     # Zeitstempel für eindeutigen Dateinamen
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     script_dir = Path(__file__).parent.resolve()
-    filename = os.path.join(script_dir, "JSON", f"{filename_prefix}_{timestamp}.json")
+    json_dir = script_dir / "JSON"
+    json_dir.mkdir(parents=True, exist_ok=True)
+    
+    file_path = json_dir / f"{filename_prefix}_{timestamp}.json"
 
     try:
-        with open(filename, 'w', encoding='utf-8') as f:
+        with open(file_path, 'w', encoding='utf-8') as f:
             # ensure_ascii=False sorgt dafür, dass Umlaute etc. lesbar bleiben
             json.dump(data, f, indent=4, ensure_ascii=False)
         
         print("\n" + "="*40)
-        print(f"💾 Backup erfolgreich erstellt: {filename}")
+        print(f"💾 Backup erfolgreich erstellt: {file_path}")
         print("="*40)
         
     except IOError as e:
