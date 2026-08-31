@@ -14,7 +14,7 @@ VERIFY_SSL = False
 
 def get_to_keep_laboratory_orders():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(script_dir, 'Laborwerte_zum_behalten_mit_Normwerten.xlsx')
+    file_path = os.path.join(script_dir, 'Laborwerte_zum_behalten_19_01_26.xlsx')
     df = pd.read_excel(file_path)
     df = df.dropna()
     return df

@@ -55,7 +55,16 @@ def get_lab_samples_set_members():
 
 
 def get_laboratory_orders(lab_samples_set_members):
-    ALL_CONCEPT_NAME = [member['name'] for member in lab_samples_set_members]
+    if not lab_samples_set_members:
+        return {}
+
+    # Falls das Dictionary aus get_lab_samples_set_members übergeben wurde
+    if isinstance(lab_samples_set_members, dict):
+        members = lab_samples_set_members.get("Lab Samples", {}).get("set_members", [])
+    else:
+        members = lab_samples_set_members
+
+    ALL_CONCEPT_NAME = [member['name'] for member in members if isinstance(member, dict) and 'name' in member]
     
     # Wir bauen ein Dictionary, das die Eltern-Kind-Beziehung erhält
     backup_data = {}
@@ -215,10 +224,10 @@ def restore_from_backup(filename):
 
 
 if __name__ == "__main__":
-    lab_samples_set_members = get_lab_samples_set_members()
-    save_backup_to_file(lab_samples_set_members, "backup_lab_samples_set_members")
-    all_laboratory_orders = get_laboratory_orders(lab_samples_set_members)
-    save_backup_to_file(all_laboratory_orders, "backup_all_lab_orders") # --> Saves the original state of all set members of all laboratory orders
+    # lab_samples_set_members = get_lab_samples_set_members()
+    # save_backup_to_file(lab_samples_set_members, "backup_lab_samples_set_members")
+    # all_laboratory_orders = get_laboratory_orders(lab_samples_set_members)
+    # save_backup_to_file(all_laboratory_orders, "backup_all_lab_orders") # --> Saves the original state of all set members of all laboratory orders
 
-    # restore_from_backup("backup_lab_samples_set_members_original_state.json")
-    # restore_from_backup("backup_all_lab_orders_original_state.json")
+    restore_from_backup("backup_lab_samples_set_members_original_state.json")
+    restore_from_backup("backup_all_lab_orders_original_state.json")
