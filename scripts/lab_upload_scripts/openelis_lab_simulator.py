@@ -132,7 +132,93 @@ def get_analysis_id(sample_id, test_id):
             result = cur.fetchone()
             return int(result[0]) if result else None
 
-def submit_test_result(session, analysis_id, test_id, result_value, accession_number, sample_type_name):
+def get_test_normal_range(test_id):
+    """
+    Fragt die hinterlegten Grenzwerte (low_normal, high_normal, id) für eine test_id aus OpenELIS ab.
+    """
+    query = """
+        SELECT id, low_normal, high_normal, low_valid, high_valid 
+        FROM clinlims.result_limits 
+        WHERE test_id = %s 
+        ORDER BY id DESC 
+        LIMIT 1;
+    """
+    try:
+        with psycopg2.connect(**DB_SETTINGS) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (test_id,))
+                row = cur.fetchone()
+                if row:
+                    limit_id, low_norm, high_norm, low_valid, high_valid = row
+                    
+                    def parse_val(v):
+                        if v is None or str(v).lower() in ('-infinity', 'infinity', 'nan', ''):
+                            return None
+                        try:
+                            return float(v)
+                        except (ValueError, TypeError):
+                            return None
+
+                    return {
+                        "limit_id": limit_id,
+                        "low_normal": parse_val(low_norm),
+                        "high_normal": parse_val(high_norm),
+                        "low_valid": parse_val(low_valid),
+                        "high_valid": parse_val(high_valid)
+                    }
+    except Exception as e:
+        print(f"⚠️ Fehler beim Abrufen der Result Limits für Test {test_id}: {e}")
+    return None
+
+def generate_gaussian_value_from_range(normal_range, fallback_min=10, fallback_max=50):
+    """
+    Generiert einen normalverteilten Wert (Gauß-Verteilung) basierend auf dem Normbereich.
+    Liegt mit ca. 95.45% Wahrscheinlichkeit im Normbereich [low_normal, high_normal].
+    """
+    if not normal_range:
+        return str(random.randint(fallback_min, fallback_max))
+
+    low = normal_range.get("low_normal")
+    high = normal_range.get("high_normal")
+
+    # Fall 1: Beidseitig begrenzter Normbereich [low, high]
+    if low is not None and high is not None and low < high:
+        mu = (low + high) / 2.0
+        sigma = (high - low) / 4.0  # 95.45% aller Werte liegen im Intervall [mu - 2*sigma, mu + 2*sigma]
+        val = random.gauss(mu, sigma)
+
+        # Bestimme Dezimalstellen anhand der Grenzwerte
+        def get_decimals(num):
+            s = str(num)
+            if '.' in s:
+                dec = s.split('.')[1]
+                if dec != '0':
+                    return len(dec)
+            return 0
+
+        precision = max(get_decimals(low), get_decimals(high))
+        if precision > 0:
+            return f"{val:.{precision}f}"
+        return str(int(round(val)))
+
+    # Fall 2: Nur Obergrenze vorhanden (z. B. CRP < 5.0)
+    elif high is not None and (low is None or low <= 0):
+        mu = high * 0.4
+        sigma = high * 0.2
+        val = max(0.0, random.gauss(mu, sigma))
+        return f"{val:.1f}"
+
+    # Fall 3: Nur Untergrenze vorhanden (z. B. eGFR > 90)
+    elif low is not None and high is None:
+        mu = low * 1.15
+        sigma = low * 0.08
+        val = random.gauss(mu, sigma)
+        return f"{val:.1f}"
+
+    # Fall 4: Kein gültiger Bereich gefunden -> Fallback
+    return str(random.randint(fallback_min, fallback_max))
+
+def submit_test_result(session, analysis_id, test_id, result_value, accession_number, sample_type_name, result_limit_id=""):
     encoded_sample_type = urllib.parse.quote(sample_type_name)
     ui_referer = f"https://localhost/openelis/AccessionResults.do?accessionNumber={accession_number}&sampleType={encoded_sample_type}&referer=LabDashboard"
     warmup_url = f"{ELIS_BASE_URL}/AccessionResults.do?accessionNumber={accession_number}&sampleType={encoded_sample_type}&referer=LabDashboard"
@@ -155,7 +241,7 @@ def submit_test_result(session, analysis_id, test_id, result_value, accession_nu
         ("testResult[1].testId", str(test_id)),
         ("testResult[1].technicianSignatureId", ""),
         ("testResult[1].testKitId", ""),
-        ("testResult[1].resultLimitId", ""),
+        ("testResult[1].resultLimitId", str(result_limit_id) if result_limit_id else ""),
         ("testResult[1].resultType", "N"),
         ("testResult[1].valid", "true"),
         ("testResult[1].referralId", ""),
@@ -224,6 +310,14 @@ if __name__ == "__main__":
                 analysis_id = get_analysis_id(sample_id, test_id)
                 
                 if analysis_id:
-                    random_value = str(random.randint(10, 50))
-                    print(f"📤 Sende Zufallswert {random_value} für Test ID {test_id} ({sample_type_name})...")
-                    submit_test_result(session, analysis_id, test_id, random_value, accession_number, sample_type_name)
+                    normal_range = get_test_normal_range(test_id)
+                    simulated_value = generate_gaussian_value_from_range(normal_range)
+                    limit_id = normal_range.get("limit_id", "") if normal_range else ""
+                    
+                    if normal_range and (normal_range.get("low_normal") is not None or normal_range.get("high_normal") is not None):
+                        range_str = f"[{normal_range.get('low_normal')}, {normal_range.get('high_normal')}]"
+                    else:
+                        range_str = "Kein Normbereich (Fallback)"
+                        
+                    print(f"📤 Sende Wert {simulated_value} (Normbereich: {range_str}) für Test ID {test_id} ({sample_type_name})...")
+                    submit_test_result(session, analysis_id, test_id, simulated_value, accession_number, sample_type_name, limit_id)
