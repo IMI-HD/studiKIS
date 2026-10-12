@@ -146,7 +146,7 @@
     },
     "label": "All",
     "order": 5,
-    "requiredPrivilege": "app:clinical"
+    "requiredPrivilege": "App: Clinical: View All Patients"
   },
   "bahmniClinicalConceptSetGroupObservationsHistory": {
     "id": "bahmni.clinical.conceptSetGroup.observations.history",
