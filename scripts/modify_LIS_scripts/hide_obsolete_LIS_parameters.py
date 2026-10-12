@@ -193,3 +193,4 @@ if __name__ == "__main__":
         
         # 2. Master Set bereinigen
         clean_master_lab_samples(empty_sets)
+    # sudo ~/.venv/bahmni/bin/python KIS-Projekt/scripts/modify_LIS_scripts/hide_obsolete_LIS_parameters.py

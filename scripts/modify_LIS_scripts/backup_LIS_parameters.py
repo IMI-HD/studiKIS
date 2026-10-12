@@ -242,3 +242,5 @@ if __name__ == "__main__":
 
     restore_from_backup("backup_lab_samples_set_members_original_state.json")
     restore_from_backup("backup_all_lab_orders_original_state.json")
+
+    # sudo ~/.venv/bahmni/bin/python KIS-Projekt/scripts/modify_LIS_scripts/backup_LIS_parameters.py

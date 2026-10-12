@@ -252,3 +252,4 @@ if __name__ == "__main__":
     # append_suffix_to_set_members()
     df = get_to_keep_laboratory_orders()
     update_fsn_only(df)
+    # sudo ~/.venv/bahmni/bin/python KIS-Projekt/scripts/modify_LIS_scripts/rename_LIS_parameters.py
