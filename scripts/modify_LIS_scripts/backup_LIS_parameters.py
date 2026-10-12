@@ -134,7 +134,7 @@ def save_backup_to_file(data, filename_prefix):
     # Zeitstempel für eindeutigen Dateinamen
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     script_dir = Path(__file__).parent.resolve()
-    json_dir = script_dir / "JSON"
+    json_dir = script_dir.parent / "JSON"
     json_dir.mkdir(parents=True, exist_ok=True)
     
     file_path = json_dir / f"{filename_prefix}_{timestamp}.json"
@@ -156,13 +156,24 @@ def restore_from_backup(filename):
     """
     Liest eine Backup-JSON Datei ein und überschreibt die Set Members
     der darin enthaltenen Eltern-Konzepte.
+    Sucht standardmäßig im Ordner 'scripts/JSON'.
     """
-    # 1. Pfad zur Datei im JSON-Ordner konstruieren
+    path_input = Path(filename)
     script_dir = Path(__file__).parent.resolve()
-    file_path = script_dir / "JSON" / filename
+    json_dir = script_dir.parent / "JSON"
+    file_path = json_dir / filename
+
+    # Falls nicht direkt in scripts/JSON gefunden, alternative Pfade prüfen
+    if not file_path.exists():
+        if path_input.is_file():
+            file_path = path_input.resolve()
+        elif (script_dir.parent.parent / filename).is_file():
+            file_path = (script_dir.parent.parent / filename).resolve()
+        elif (script_dir / "JSON" / filename).is_file():
+            file_path = (script_dir / "JSON" / filename).resolve()
 
     if not file_path.exists():
-        print(f"❌ Fehler: Die Datei '{filename}' wurde im Ordner 'JSON' nicht gefunden.")
+        print(f"❌ Fehler: Die Datei '{filename}' wurde im Ordner '{json_dir}' nicht gefunden.")
         return
 
     print(f"📂 Lese Backup Datei: {filename}...")
