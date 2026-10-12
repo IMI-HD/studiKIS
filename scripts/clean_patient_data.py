@@ -1,15 +1,24 @@
 import mysql.connector
 import sys
 
+# UTF-8 Encoding auf Windows-Konsole sicherstellen
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 # --- KONFIGURATION ---
 DB_CONFIG = {
     'user': 'openmrs-user',
     'password': 'password',  
+    # 'host': 'localhost',
     'host': 'kis-lab.mi.intern',
     'port': 3307,            
     'database': 'openmrs'
 }
-TARGET_IDENTIFIER = 'LAB000003'
+TARGET_IDENTIFIER = 'ABC200003'
 
 def delete_patient_strictly(identifier=TARGET_IDENTIFIER):
     print(f"🔌 Verbinde mit Datenbank auf Port {DB_CONFIG['port']}...")
@@ -65,9 +74,29 @@ def delete_patient_strictly(identifier=TARGET_IDENTIFIER):
         cursor.execute("SET FOREIGN_KEY_CHECKS=1")
         print(f"3.5 Orders gelöscht.")
 
-        # 3.8 Bed Patient Assignment Map (Hängt am Patient & Encounter)
+        # 3.8 Bed Patient Assignment Map & Betten freigeben
+        cursor.execute("SELECT DISTINCT bed_id FROM bed_patient_assignment_map WHERE patient_id = %s", (patient_id,))
+        assigned_bed_ids = [r[0] for r in cursor.fetchall()]
+
         cursor.execute("DELETE FROM bed_patient_assignment_map WHERE patient_id = %s", (patient_id,))
         print(f"3.8 Bed Patient Assignment Map gelöscht: {cursor.rowcount}")
+
+        if assigned_bed_ids:
+            sql_free_beds = f"UPDATE bed SET status = 'AVAILABLE' WHERE bed_id IN ({format_ids(assigned_bed_ids)})"
+            cursor.execute(sql_free_beds, assigned_bed_ids)
+            print(f"3.8b Betten freigegeben (Status 'AVAILABLE'): {cursor.rowcount} (Bett-IDs: {assigned_bed_ids})")
+
+        # Sicherheitsnetz: Verwaiste belegte Betten ohne aktive Zuordnung auf AVAILABLE setzen
+        cursor.execute("""
+            UPDATE bed 
+            SET status = 'AVAILABLE' 
+            WHERE status = 'OCCUPIED' 
+              AND bed_id NOT IN (
+                  SELECT bed_id FROM bed_patient_assignment_map WHERE date_stopped IS NULL
+              )
+        """)
+        if cursor.rowcount > 0:
+            print(f"3.8c Verwaiste belegte Betten freigegeben: {cursor.rowcount}")
 
         # 4. Encounter (Jetzt leer, kann weg)
         if enc_ids:
