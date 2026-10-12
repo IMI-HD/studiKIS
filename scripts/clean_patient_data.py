@@ -1,19 +1,26 @@
 import mysql.connector
 import sys
 
+# UTF-8 Encoding auf Windows-Konsole sicherstellen
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 # --- KONFIGURATION ---
-# Bitte Port und Passwort prüfen (wie im vorherigen Skript)
 DB_CONFIG = {
     'user': 'openmrs-user',
-    'password': 'password',  # Oder 'Admin123', je nach Ihrer .env
-    'host': 'localhost',
-    'port': 3307,            # Ihr Docker-Mapping Port
+    'password': 'password',  
+    # 'host': 'localhost',
+    'host': 'kis-lab.mi.intern',
+    'port': 3307,            
     'database': 'openmrs'
 }
+TARGET_IDENTIFIER = 'ABC200003'
 
-TARGET_IDENTIFIER = '0001310848'
-
-def delete_patient_strictly():
+def delete_patient_strictly(identifier=TARGET_IDENTIFIER):
     print(f"🔌 Verbinde mit Datenbank auf Port {DB_CONFIG['port']}...")
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
@@ -23,7 +30,7 @@ def delete_patient_strictly():
 
     try:
         # 1. IDs sammeln
-        cursor.execute("SELECT patient_id FROM patient_identifier WHERE identifier = %s", (TARGET_IDENTIFIER,))
+        cursor.execute("SELECT patient_id FROM patient_identifier WHERE identifier = %s", (identifier,))
         row = cursor.fetchone()
         if not row: 
             print("❌ Patient nicht gefunden.")
@@ -47,14 +54,49 @@ def delete_patient_strictly():
             print(f"1. Encounter Provider gelöscht: {cursor.rowcount}")
 
         # 2. Observations (Hängt am Encounter & Person)
-        # Erst Kinder (Gruppen), dann Eltern löschen
-        cursor.execute("DELETE FROM obs WHERE obs_group_id IS NOT NULL AND person_id = %s", (patient_id,))
+        # Um Probleme mit zirkulären Referenzen (obs_group_id) zu vermeiden,
+        # deaktivieren wir hier explizit die Foreign Key Checks für diese session
+        cursor.execute("SET FOREIGN_KEY_CHECKS=0")
         cursor.execute("DELETE FROM obs WHERE person_id = %s", (patient_id,))
-        print(f"2. Observations gelöscht (Clean).")
+        deleted_obs = cursor.rowcount
+        cursor.execute("SET FOREIGN_KEY_CHECKS=1")
+        print(f"2. Observations gelöscht: {deleted_obs}")
 
         # 3. Conditions (Hängt am Patient)
         cursor.execute("DELETE FROM conditions WHERE patient_id = %s", (patient_id,))
         print(f"3. Conditions gelöscht: {cursor.rowcount}")
+
+        # 3.5 Orders (Hängen am Encounter & Patient)
+        cursor.execute("SET FOREIGN_KEY_CHECKS=0")
+        cursor.execute("DELETE FROM test_order WHERE order_id IN (SELECT order_id FROM orders WHERE patient_id = %s)", (patient_id,))
+        cursor.execute("DELETE FROM drug_order WHERE order_id IN (SELECT order_id FROM orders WHERE patient_id = %s)", (patient_id,))
+        cursor.execute("DELETE FROM orders WHERE patient_id = %s", (patient_id,))
+        cursor.execute("SET FOREIGN_KEY_CHECKS=1")
+        print(f"3.5 Orders gelöscht.")
+
+        # 3.8 Bed Patient Assignment Map & Betten freigeben
+        cursor.execute("SELECT DISTINCT bed_id FROM bed_patient_assignment_map WHERE patient_id = %s", (patient_id,))
+        assigned_bed_ids = [r[0] for r in cursor.fetchall()]
+
+        cursor.execute("DELETE FROM bed_patient_assignment_map WHERE patient_id = %s", (patient_id,))
+        print(f"3.8 Bed Patient Assignment Map gelöscht: {cursor.rowcount}")
+
+        if assigned_bed_ids:
+            sql_free_beds = f"UPDATE bed SET status = 'AVAILABLE' WHERE bed_id IN ({format_ids(assigned_bed_ids)})"
+            cursor.execute(sql_free_beds, assigned_bed_ids)
+            print(f"3.8b Betten freigegeben (Status 'AVAILABLE'): {cursor.rowcount} (Bett-IDs: {assigned_bed_ids})")
+
+        # Sicherheitsnetz: Verwaiste belegte Betten ohne aktive Zuordnung auf AVAILABLE setzen
+        cursor.execute("""
+            UPDATE bed 
+            SET status = 'AVAILABLE' 
+            WHERE status = 'OCCUPIED' 
+              AND bed_id NOT IN (
+                  SELECT bed_id FROM bed_patient_assignment_map WHERE date_stopped IS NULL
+              )
+        """)
+        if cursor.rowcount > 0:
+            print(f"3.8c Verwaiste belegte Betten freigegeben: {cursor.rowcount}")
 
         # 4. Encounter (Jetzt leer, kann weg)
         if enc_ids:
@@ -62,6 +104,11 @@ def delete_patient_strictly():
             cursor.execute(sql, enc_ids)
             print(f"4. Encounters gelöscht: {cursor.rowcount}")
 
+        # --- NEU: 5a. Visit Attributes (Hängen am Visit) ---
+        # Wir müssen erst die Attribute löschen, die auf die Visits des Patienten verweisen
+        cursor.execute("""DELETE FROM visit_attribute WHERE visit_id IN (SELECT visit_id FROM visit WHERE patient_id = %s)""", (patient_id,))
+        print(f"5a. Visit Attributes gelöscht: {cursor.rowcount}")
+        
         # 5. Visit (Hängt am Patient, Encounter sind weg)
         cursor.execute("DELETE FROM visit WHERE patient_id = %s", (patient_id,))
         print(f"5. Visits gelöscht: {cursor.rowcount}")
@@ -74,6 +121,10 @@ def delete_patient_strictly():
         # Muss vor der Tabelle 'patient' gelöscht werden
         cursor.execute("DELETE FROM audit_log WHERE patient_id = %s", (patient_id,))
         print(f"7. Audit Logs gelöscht: {cursor.rowcount}")
+
+        # --- NEU: 7.5 Allergy (Hängt am Patient) ---
+        cursor.execute("DELETE FROM allergy WHERE patient_id = %s", (patient_id,))
+        print(f"7.5 Allergies gelöscht: {cursor.rowcount}")
 
         # 8. Patient (Hängt an Person)
         cursor.execute("DELETE FROM patient WHERE patient_id = %s", (patient_id,))
@@ -100,4 +151,7 @@ def delete_patient_strictly():
         if conn: conn.close()
 
 if __name__ == "__main__":
-    delete_patient_strictly()
+    target = TARGET_IDENTIFIER
+    if len(sys.argv) > 1:
+        target = sys.argv[1]
+    delete_patient_strictly(target)

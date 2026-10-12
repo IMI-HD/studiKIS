@@ -18,7 +18,7 @@ VERIFY_SSL = False
 
 def get_to_keep_laboratory_orders():
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    file_path = os.path.join(script_dir, 'Laborwerte_zum_behalten.xlsx')
+    file_path = os.path.join(script_dir, 'Laborwerte_zum_behalten_mit_Normwerten.xlsx')
     df = pd.read_excel(file_path)
     df = df.dropna()
     return df
@@ -55,7 +55,16 @@ def get_lab_samples_set_members():
 
 
 def get_laboratory_orders(lab_samples_set_members):
-    ALL_CONCEPT_NAME = [member['name'] for member in lab_samples_set_members]
+    if not lab_samples_set_members:
+        return {}
+
+    # Falls das Dictionary aus get_lab_samples_set_members übergeben wurde
+    if isinstance(lab_samples_set_members, dict):
+        members = lab_samples_set_members.get("Lab Samples", {}).get("set_members", [])
+    else:
+        members = lab_samples_set_members
+
+    ALL_CONCEPT_NAME = [member['name'] for member in members if isinstance(member, dict) and 'name' in member]
     
     # Wir bauen ein Dictionary, das die Eltern-Kind-Beziehung erhält
     backup_data = {}
@@ -116,6 +125,7 @@ def get_laboratory_orders(lab_samples_set_members):
 def save_backup_to_file(data, filename_prefix):
     """
     Speichert das Dictionary in eine JSON Datei mit Zeitstempel.
+    Erstellt den Zielordner, falls er noch nicht existiert.
     """
     if not data:
         print("❌ Keine Daten zum Speichern vorhanden.")
@@ -124,15 +134,18 @@ def save_backup_to_file(data, filename_prefix):
     # Zeitstempel für eindeutigen Dateinamen
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     script_dir = Path(__file__).parent.resolve()
-    filename = os.path.join(script_dir, "JSON", f"{filename_prefix}_{timestamp}.json")
+    json_dir = script_dir.parent / "JSON"
+    json_dir.mkdir(parents=True, exist_ok=True)
+    
+    file_path = json_dir / f"{filename_prefix}_{timestamp}.json"
 
     try:
-        with open(filename, 'w', encoding='utf-8') as f:
+        with open(file_path, 'w', encoding='utf-8') as f:
             # ensure_ascii=False sorgt dafür, dass Umlaute etc. lesbar bleiben
             json.dump(data, f, indent=4, ensure_ascii=False)
         
         print("\n" + "="*40)
-        print(f"💾 Backup erfolgreich erstellt: {filename}")
+        print(f"💾 Backup erfolgreich erstellt: {file_path}")
         print("="*40)
         
     except IOError as e:
@@ -143,13 +156,24 @@ def restore_from_backup(filename):
     """
     Liest eine Backup-JSON Datei ein und überschreibt die Set Members
     der darin enthaltenen Eltern-Konzepte.
+    Sucht standardmäßig im Ordner 'scripts/JSON'.
     """
-    # 1. Pfad zur Datei im JSON-Ordner konstruieren
+    path_input = Path(filename)
     script_dir = Path(__file__).parent.resolve()
-    file_path = script_dir / "JSON" / filename
+    json_dir = script_dir.parent / "JSON"
+    file_path = json_dir / filename
+
+    # Falls nicht direkt in scripts/JSON gefunden, alternative Pfade prüfen
+    if not file_path.exists():
+        if path_input.is_file():
+            file_path = path_input.resolve()
+        elif (script_dir.parent.parent / filename).is_file():
+            file_path = (script_dir.parent.parent / filename).resolve()
+        elif (script_dir / "JSON" / filename).is_file():
+            file_path = (script_dir / "JSON" / filename).resolve()
 
     if not file_path.exists():
-        print(f"❌ Fehler: Die Datei '{filename}' wurde im Ordner 'JSON' nicht gefunden.")
+        print(f"❌ Fehler: Die Datei '{filename}' wurde im Ordner '{json_dir}' nicht gefunden.")
         return
 
     print(f"📂 Lese Backup Datei: {filename}...")
@@ -208,15 +232,6 @@ def restore_from_backup(filename):
 
     print("\n✅ Wiederherstellung abgeschlossen.")
 
-
-def hide_obsolete_laboratory_orders(to_keep_laboratory_orders_df, all_laboratory_orders):
-    for uuid, name in all_laboratory_orders.items():
-        if uuid == "165981AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA":
-            if uuid in to_keep_laboratory_orders_df['UUID'].values:
-                continue
-            print(f"Hide {name} ({uuid})...")
-            stop
-            retire_concept(uuid)
 
 
 if __name__ == "__main__":

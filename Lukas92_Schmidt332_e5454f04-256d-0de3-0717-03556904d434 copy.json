@@ -1,0 +1,185 @@
+{
+  "resourceType": "Bundle",
+  "type": "transaction",
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:e5454f04-256d-0de3-0717-03556904d434",
+      "resource": {
+        "resourceType": "Patient",
+        "id": "e5454f04-256d-0de3-0717-03556904d434",
+        "identifier": [
+          {
+            "id": "8361c89d-aa91-4c86-8240-d0054236259e",
+            "use": "official",
+            "type": {
+              "coding": [
+                {
+                  "code": "d3153eb0-5e07-11ef-8f7c-0242ac120002"
+                }
+              ],
+              "text": "Patient Identifier"
+            },
+            "value": "ABC210000"
+          }
+        ],
+        "active": true,
+        "name": [
+          {
+            "family": "Schmidt332",
+            "given": [
+              "Lukas92",
+              "Elias404"
+            ]
+          }
+        ],
+        "gender": "male",
+        "birthDate": "2019-06-20",
+        "deceasedBoolean": false
+      },
+      "request": {
+        "method": "POST",
+        "url": "Patient"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:e5454f04-256d-0de3-ed74-f4251b1afe02",
+      "resource": {
+        "resourceType": "Encounter",
+        "id": "e5454f04-256d-0de3-ed74-f4251b1afe02",
+        "status": "finished",
+        "class": {
+          "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+          "code": "AMB"
+        },
+        "type": [
+          {
+            "coding": [
+              {
+                "system": "http://fhir.openmrs.org/code-system/visit-type",
+                "code": "b7494a80-fdf9-49bb-bb40-396c47b40343",
+                "display": "IPD"
+              }
+            ]
+          }
+        ],
+        "subject": {
+          "reference": "urn:uuid:e5454f04-256d-0de3-0717-03556904d434",
+          "type": "Patient"
+        },
+        "period": {
+          "start": "2019-06-20T12:16:55+02:00",
+          "end": "2019-06-20T12:31:55+02:00"
+        },
+        "location": [
+          {
+            "location": {
+              "reference": "Location/72636eba-29bf-4d6c-97c4-4b04d87a95b5",
+              "type": "Location",
+              "display": "Bahmni Hospital"
+            }
+          }
+        ]
+      },
+      "request": {
+        "method": "POST",
+        "url": "Encounter"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:e5454f04-266d-0de3-ed74-f4251b1afe02",
+      "resource": {
+        "resourceType": "Encounter",
+        "id": "e5454f04-266d-0de3-ed74-f4251b1afe02",
+        "status": "finished",
+        "class": {
+          "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+          "code": "AMB"
+        },
+        "type": [
+          {
+            "coding": [
+              {
+                "system": "http://fhir.openmrs.org/code-system/encounter-type",
+                "code": "d34fe3ab-5e07-11ef-8f7c-0242ac120002",
+                "display": "Consultation"
+              }
+            ]
+          }
+        ],
+        "subject": {
+          "reference": "urn:uuid:e5454f04-256d-0de3-0717-03556904d434",
+          "type": "Patient"
+        },
+        "period": {
+          "start": "2019-06-20T12:16:55+02:00",
+          "end": "2019-06-20T12:31:55+02:00"
+        },
+        "location": [
+          {
+            "location": {
+              "reference": "Location/72636eba-29bf-4d6c-97c4-4b04d87a95b5",
+              "type": "Location",
+              "display": "Bahmni Hospital"
+            }
+          }
+        ],
+        "partOf": {
+          "reference": "urn:uuid:e5454f04-256d-0de3-ed74-f4251b1afe02",
+          "type": "Encounter"
+        }
+      },
+      "request": {
+        "method": "POST",
+        "url": "Encounter"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:e5454f04-256d-0de3-75e3-55e03233d344",
+      "resource": {
+        "resourceType": "Observation",
+        "id": "e5454f04-256d-0de3-75e3-55e03233d344",
+        "status": "final",
+        "code": {
+          "coding": [
+            {
+              "code": "9bb0795c-4ff0-0305-1990-000000000020",
+              "display": "Temperature"
+            }
+          ],
+          "text": "Temperature"
+        },
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "vital-signs",
+                "display": "Vital signs"
+              }
+            ]
+          }
+        ],
+        "subject": {
+          "reference": "urn:uuid:e5454f04-256d-0de3-0717-03556904d434",
+          "type": "Patient"
+        },
+        "encounter": {
+          "reference": "urn:uuid:e5454f04-266d-0de3-ed74-f4251b1afe02",
+          "type": "Encounter"
+        },
+        "effectiveDateTime": "2019-06-20T12:16:55+02:00",
+        "issued": "2019-06-20T12:16:55.003+02:00",
+        "valueQuantity": {
+          "value": 38.0,
+          "unit": "C",
+          "system": "http://unitsofmeasure.org",
+          "code": "C"
+        }
+      },
+      "request": {
+        "method": "POST",
+        "url": "Observation"
+      }
+    }
+  ]
+}
