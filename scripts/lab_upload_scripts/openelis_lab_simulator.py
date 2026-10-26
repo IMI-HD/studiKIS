@@ -81,7 +81,7 @@ TARGET_DOB = "19510623"  # 23.06.1951 (YYYYMMDD)
 EXCEL_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "predefined_patients",
-    "Laborwerte für Rolf Hertz.xlsx"
+    "Laborwerte Rolf Hertz.xlsx"
 )
 
 DB_SETTINGS = {
