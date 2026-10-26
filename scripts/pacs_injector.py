@@ -1,4 +1,5 @@
 import os
+import io
 import json
 import time
 import glob
@@ -9,6 +10,8 @@ from pydicom.sequence import Sequence
 from pydicom.uid import generate_uid, ExplicitVRLittleEndian
 from pynetdicom import AE
 from PIL import Image, ImageDraw, ImageFont
+
+
 
 # 1. DEINE ANGEPASSTEN PFADE
 TRIGGER_DIR = "/var/lib/docker/volumes/bahmni-standard_mirth_pacs_data/_data/triggers"
@@ -49,7 +52,7 @@ Kein Anhalt für frische ossäre Läsionen oder akuten Interventionsbedarf.
 def render_report_image(report_text, width=1200, height=1500):
     """
     Rendert den Befundtext auf ein Dokumenten-Bild (weißer Hintergrund, schwarze Schrift).
-    Dadurch kann Oviyam2 das Dokument direkt über seinen Canvas darstellen!
+    Dadurch kann Oviyam2 das Dokument direkt und ohne Ladefehler auf dem Canvas darstellen!
     """
     img = Image.new('L', (width, height), color=255)
     draw = ImageDraw.Draw(img)
@@ -86,8 +89,9 @@ def render_report_image(report_text, width=1200, height=1500):
 
 def create_report_image_dataset(template_file, report_text, patient_id, patient_name, accession_number, study_instance_uid, procedure):
     """
-    Erstellt ein DICOM-Objekt für den Befundbericht mit gerenderten Pixeldaten.
-    Erhält dieselbe StudyInstanceUID wie das Röntgenbild, aber eine eigene Serie (SeriesNumber 2).
+    Erstellt ein DICOM-Objekt für den Befundbericht mit gerenderten Pixeldaten
+    UND dem unformatierten Befundtext im ImageComments-Tag (Tag 0020,4000).
+    Dadurch kann man in Oviyam2 den Text über das 'i'-Symbol (DICOM Header) markieren und kopieren!
     """
     report_img = render_report_image(report_text)
     
@@ -127,6 +131,144 @@ def create_report_image_dataset(template_file, report_text, patient_id, patient_
     report_ds.SeriesDescription = "Befundbericht (Dokument)"
     report_ds.StudyDescription = f"Radiology Order - {procedure}" if procedure else "Radiology Order"
     report_ds.Modality = "OT"  # Other / Dokumentation
+
+    # Befundtext als kopierbarer ImageComment & StudyComment hinterlegen
+    report_ds.SpecificCharacterSet = "ISO_IR 192"
+    report_ds.ImageComments = report_text
+    report_ds.StudyComments = report_text
+
+    return report_ds
+
+
+def generate_report_pdf(report_text):
+    """
+    Erstellt ein PDF-Dokument (Bytes) aus dem übergebenen Befundtext.
+    Verwendet reportlab (falls installiert) oder einen leichtgewichtigen,
+    vollständig standardkonformen pure-Python-Fallback.
+    """
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
+
+        buffer = io.BytesIO()
+        c = canvas.Canvas(buffer, pagesize=A4)
+        width, height = A4
+        textobject = c.beginText(50, height - 60)
+        textobject.setFont("Courier", 10)
+        textobject.setLeading(14)
+        for line in report_text.splitlines():
+            textobject.textLine(line)
+        c.drawText(textobject)
+        c.showPage()
+        c.save()
+        return buffer.getvalue()
+    except ImportError:
+        # Robuster Fallback ohne externe Abhängigkeiten
+        lines = report_text.splitlines()
+        font_size = 10
+        line_height = 14
+        margin_left = 50
+        margin_top = 780
+
+        def escape_pdf(s):
+            return s.replace('\\', '\\\\').replace('(', '\\(').replace(')', '\\)')
+
+        content_lines = ['BT', f'/F1 {font_size} Tf', f'{margin_left} {margin_top} Td']
+        first = True
+        for line in lines:
+            safe_line = escape_pdf(line)
+            if first:
+                content_lines.append(f'({safe_line}) Tj')
+                first = False
+            else:
+                content_lines.append(f'0 -{line_height} Td')
+                content_lines.append(f'({safe_line}) Tj')
+        content_lines.append('ET')
+        stream_content = '\n'.join(content_lines).encode('latin-1', 'replace')
+        stream_len = len(stream_content)
+
+        objects = [
+            b'1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+            b'2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
+            b'3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> /MediaBox [0 0 595 842] /Contents 5 0 R >>\nendobj\n',
+            b'4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>\nendobj\n',
+            f'5 0 obj\n<< /Length {stream_len} >>\nstream\n'.encode('ascii') + stream_content + b'\nendstream\nendobj\n'
+        ]
+
+        header = b'%PDF-1.4\n'
+        body = b''
+        offsets = [0]
+        curr_offset = len(header)
+        for obj in objects:
+            offsets.append(curr_offset)
+            curr_offset += len(obj)
+            body += obj
+
+        xref_offset = curr_offset
+        xref = f'xref\n0 {len(offsets)}\n0000000000 65535 f \n'.encode('ascii')
+        for off in offsets[1:]:
+            xref += f'{off:010d} 00000 n \n'.encode('ascii')
+
+        trailer = f'trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n'.encode('ascii')
+        return header + body + xref + trailer
+
+
+def create_report_pdf_dataset(report_text, patient_id, patient_name, accession_number, study_instance_uid, procedure):
+    """
+    Erstellt ein DICOM Encapsulated PDF Dataset (SOP Class 1.2.840.10008.5.1.4.1.1.104.1).
+    Erhält dieselbe StudyInstanceUID wie das Röntgenbild (SeriesNumber 2, Modality DOC).
+    Der Text im PDF ist im Viewer / Browser selektier- und kopierbar!
+    """
+    ENCAPSULATED_PDF_STORAGE = "1.2.840.10008.5.1.4.1.1.104.1"
+    pdf_bytes = generate_report_pdf(report_text)
+
+    report_sop_uid = generate_uid()
+    report_series_uid = generate_uid()
+
+    file_meta = FileMetaDataset()
+    file_meta.MediaStorageSOPClassUID = ENCAPSULATED_PDF_STORAGE
+    file_meta.MediaStorageSOPInstanceUID = report_sop_uid
+    file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+
+    report_ds = Dataset()
+    report_ds.file_meta = file_meta
+    report_ds.is_little_endian = True
+    report_ds.is_implicit_VR = False
+
+    now = datetime.now()
+    date_str = now.strftime("%Y%m%d")
+    time_str = now.strftime("%H%M%S")
+
+    # DICOM Standard-Attribute für Encapsulated Document
+    report_ds.SOPClassUID = ENCAPSULATED_PDF_STORAGE
+    report_ds.SOPInstanceUID = report_sop_uid
+    report_ds.StudyInstanceUID = study_instance_uid  # Identisch zum Röntgenbild!
+    report_ds.SeriesInstanceUID = report_series_uid
+    report_ds.SeriesNumber = 2
+    report_ds.InstanceNumber = 1
+    report_ds.Modality = "DOC"
+    report_ds.SeriesDescription = f"Befundbericht (PDF) - {procedure}" if procedure else "Befundbericht (PDF)"
+    report_ds.StudyDescription = f"Radiology Order - {procedure}" if procedure else "Radiology Order"
+
+    report_ds.PatientID = patient_id
+    report_ds.PatientName = patient_name if patient_name else "Patient^Bahmni"
+    report_ds.AccessionNumber = accession_number
+
+    report_ds.StudyDate = date_str
+    report_ds.StudyTime = time_str
+    report_ds.ContentDate = date_str
+    report_ds.ContentTime = time_str
+    report_ds.AcquisitionDateTime = f"{date_str}{time_str}"
+
+    report_ds.BurnedInAnnotation = "YES"
+    report_ds.DocumentTitle = f"Befundbericht - {procedure}" if procedure else "Befundbericht"
+    report_ds.MIMETypeOfEncapsulatedDocument = "application/pdf"
+
+    # EncapsulatedDocument muss gerade Byte-Länge haben (DICOM OB Padding)
+    if len(pdf_bytes) % 2 != 0:
+        pdf_bytes += b"\x00"
+    report_ds.EncapsulatedDocument = pdf_bytes
+    report_ds.SpecificCharacterSet = "ISO_IR 192"
 
     return report_ds
 
@@ -257,8 +399,12 @@ def process_json_trigger(file_path):
     ds.SeriesNumber = 1
     ds.InstanceNumber = 1
     ds.SeriesDescription = f"Roentgen - {procedure}" if procedure else "Roentgenbild"
+    ds.SpecificCharacterSet = "ISO_IR 192"
+    # Befundtext auch direkt am Röntgenbild als ImageComment & StudyComment hinterlegen
+    ds.ImageComments = report_text
+    ds.StudyComments = report_text
 
-    # Befund-Dokument (mit gerendertem Text) erzeugen
+    # Befundbericht als darstellbares Dokument-Bild mit kopierbarem ImageComments-Tag erzeugen
     report_ds = create_report_image_dataset(
         template_file=TEMPLATE_FILE,
         report_text=report_text,
@@ -275,16 +421,16 @@ def process_json_trigger(file_path):
     if hasattr(report_ds, 'file_meta') and report_ds.file_meta.MediaStorageSOPClassUID != ds.file_meta.MediaStorageSOPClassUID:
         ae.add_requested_context(report_ds.file_meta.MediaStorageSOPClassUID)
 
-    print(f"[*] Sende Röntgenbild und Befundbericht-Dokument an dcm4chee ({PACS_IP}:{PACS_PORT})...")
+    print(f"[*] Sende Röntgenbild und Befundbericht an dcm4chee ({PACS_IP}:{PACS_PORT})...")
     assoc = ae.associate(PACS_IP, PACS_PORT, ae_title=PACS_AET)
 
     if assoc.is_established:
-        # 1. Röntgenbild übertragen
+        # 1. Röntgenbild übertragen (mit ImageComments)
         status_img = assoc.send_c_store(ds)
         img_success = hasattr(status_img, 'Status') and status_img.Status == 0x0000
         print(f"[V] Röntgenbild übertragen (Status: {hex(status_img.Status) if hasattr(status_img, 'Status') else status_img})")
 
-        # 2. Befundbericht-Bild übertragen
+        # 2. Befundbericht-Bild übertragen (mit ImageComments)
         status_rep = assoc.send_c_store(report_ds)
         rep_success = hasattr(status_rep, 'Status') and status_rep.Status == 0x0000
         print(f"[V] Befundbericht übertragen (Status: {hex(status_rep.Status) if hasattr(status_rep, 'Status') else status_rep})")
@@ -305,31 +451,37 @@ def process_json_trigger(file_path):
     os.remove(file_path)
     print("[*] Trigger-Datei bereinigt. Warte auf nächsten Auftrag...")
 
-# Endlosschleife zur Ordnerüberwachung
-print("=========================================")
-print("=== Bahmni-PACS-Bild-Injektor aktiv ===")
-print("=========================================")
-print(f"Überwache Mirth-Ordner: {TRIGGER_DIR}")
-print(f"Nutze Bild-Vorlage:    {TEMPLATE_FILE}")
-print("Warte auf Aufträge...")
+def main():
+    # Endlosschleife zur Ordnerüberwachung
+    print("=========================================")
+    print("=== Bahmni-PACS-Bild-Injektor aktiv ===")
+    print("=========================================")
+    print(f"Überwache Mirth-Ordner: {TRIGGER_DIR}")
+    print(f"Nutze Bild-Vorlage:    {TEMPLATE_FILE}")
+    print("Warte auf Aufträge...")
 
-# Falls Mirth den triggers-Ordner noch nicht erstellt hat, erstellen wir ihn hier sicherheitshalber
-if not os.path.exists(TRIGGER_DIR):
-    try:
-        os.makedirs(TRIGGER_DIR)
-    except Exception as e:
-        print(f"[X] Hinweis: Konnte Ordner nicht erstellen (evtl. fehlende Root-Rechte): {e}")
-
-while True:
-    for json_file in glob.glob(os.path.join(TRIGGER_DIR, "*.json")):
+    # Falls Mirth den triggers-Ordner noch nicht erstellt hat, erstellen wir ihn hier sicherheitshalber
+    if not os.path.exists(TRIGGER_DIR):
         try:
-            process_json_trigger(json_file)
+            os.makedirs(TRIGGER_DIR)
         except Exception as e:
-            print(f"[X] Kritischer Fehler bei der Verarbeitung: {e}")
-            if os.path.exists(json_file):
-                try:
-                    os.remove(json_file)
-                    print("[*] Trigger-Datei nach kritischem Fehler bereinigt.")
-                except Exception as del_err:
-                    print(f"[X] Konnte Trigger-Datei nicht loeschen: {del_err}")
-    time.sleep(1) # Jede Sekunde nach neuen JSON-Dateien suchen
+            print(f"[X] Hinweis: Konnte Ordner nicht erstellen (evtl. fehlende Root-Rechte): {e}")
+
+    while True:
+        for json_file in glob.glob(os.path.join(TRIGGER_DIR, "*.json")):
+            try:
+                process_json_trigger(json_file)
+            except Exception as e:
+                print(f"[X] Kritischer Fehler bei der Verarbeitung: {e}")
+                if os.path.exists(json_file):
+                    try:
+                        os.remove(json_file)
+                        print("[*] Trigger-Datei nach kritischem Fehler bereinigt.")
+                    except Exception as del_err:
+                        print(f"[X] Konnte Trigger-Datei nicht loeschen: {del_err}")
+        time.sleep(1) # Jede Sekunde nach neuen JSON-Dateien suchen
+
+
+if __name__ == "__main__":
+    main()
+
