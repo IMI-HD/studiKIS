@@ -1,4 +1,5 @@
 import sys
+import os
 import random
 import requests
 from requests.auth import HTTPBasicAuth
@@ -11,9 +12,61 @@ import datetime
 import urllib.parse
 import time
 import re
+import argparse
+import difflib
 from bs4 import BeautifulSoup
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Unicode-Konfiguration für Konsolenausgabe (verhindert charmap/UnicodeEncodeError)
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
+# Persistent Logging: Ausgabe parallel auf Konsole und in Logdatei schreiben
+LOG_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "openelis_simulator.log"
+)
+
+class TeeLogger:
+    """Schreibt Ausgaben gleichzeitig auf die Konsole und in eine persistente Logdatei mit Zeitstempel."""
+    def __init__(self, filename, stream):
+        self.terminal = stream
+        self.filename = filename
+        self.start_of_line = True
+
+    def write(self, message):
+        if self.terminal:
+            self.terminal.write(message)
+            self.terminal.flush()
+        try:
+            with open(self.filename, 'a', encoding='utf-8') as f:
+                lines = message.split('\n')
+                for i, line in enumerate(lines):
+                    if line:
+                        if self.start_of_line:
+                            ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            f.write(f'[{ts}] {line}')
+                        else:
+                            f.write(line)
+                        self.start_of_line = False
+                    if i < len(lines) - 1:
+                        f.write('\n')
+                        self.start_of_line = True
+        except Exception:
+            pass
+
+    def flush(self):
+        if self.terminal:
+            self.terminal.flush()
+
+if sys.stdout:
+    sys.stdout = TeeLogger(LOG_FILE, sys.stdout)
+if sys.stderr:
+    sys.stderr = TeeLogger(LOG_FILE, sys.stderr)
 
 # Konfiguration
 ELIS_BASE_URL = "https://localhost/openelis"
@@ -23,6 +76,14 @@ GENERATE_URL = f"{ELIS_BASE_URL}/ajaxQueryXML?provider=SampleEntryGenerateScanPr
 AUTH = HTTPBasicAuth('superman', 'Admin123')
 ELIS_AUTH = HTTPBasicAuth('admin', 'adminADMIN!')
 
+TARGET_WARD = "kardiologie"
+TARGET_DOB = "19510623"  # 23.06.1951 (YYYYMMDD)
+EXCEL_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "predefined_patients",
+    "Laborwerte für Rolf Hertz.xlsx"
+)
+
 DB_SETTINGS = {
     "dbname": "clinlims",
     "user": "clinlims",
@@ -30,6 +91,138 @@ DB_SETTINGS = {
     "host": "localhost",
     "port": 5432
 }
+
+# Umfangreiche Synonym-/Alias-Tabelle für gängige Labor-Kürzel und Varianten
+TEST_ALIASES = {
+    # Leber / Enzyme
+    'alt': 'alaninaminotransferases', 'gpt': 'alaninaminotransferases', 'sgpt': 'alaninaminotransferases', 'alat': 'alaninaminotransferases',
+    'ast': 'aspartataminotransferases', 'got': 'aspartataminotransferases', 'sgot': 'aspartataminotransferases', 'asat': 'aspartataminotransferases',
+    'ggt': 'γglutamyltransferaseγgts', 'gammagt': 'γglutamyltransferaseγgts', 'gamma': 'γglutamyltransferaseγgts', 'gt': 'γglutamyltransferaseγgts', 'γgt': 'γglutamyltransferaseγgts',
+    'ap': 'phosphatasealkalischeaps', 'alp': 'phosphatasealkalischeaps', 'alkalischephosphatase': 'phosphatasealkalischeaps',
+    'ck': 'kreatinkinasesck', 'creatinekinase': 'kreatinkinasesck', 'kreatinkinase': 'kreatinkinasesck',
+    'ldh': 'laktatdehydrogenaseldhs', 'laktatdehydrogenase': 'laktatdehydrogenaseldhs',
+    'bili': 'bilirubingesamts', 'bilirubin': 'bilirubingesamts', 'totalbilirubin': 'bilirubingesamts',
+    # Herz / Entzündung
+    'crp': 'creaktivesproteincrps', 'hscrp': 'creaktivesproteincrps',
+    'trop': 'troponinthss', 'troponin': 'troponinthss', 'troponint': 'troponinthss', 'tnt': 'troponinthss',
+    'bnp': 'ntprobnp', 'ntprobnp': 'ntprobnp', 'probnp': 'ntprobnp',
+    # Elektrolyte / Nieren
+    'na': 'natriums', 'sodium': 'natriums', 'natrium': 'natriums',
+    'k': 'kaliums', 'potassium': 'kaliums', 'kalium': 'kaliums',
+    'ca': 'kalziumgesamts', 'calcium': 'kalziumgesamts', 'kalzium': 'kalziumgesamts',
+    'krea': 'kreatinins', 'crea': 'kreatinins', 'creatinine': 'kreatinins', 'kreatinin': 'kreatinins',
+    'egfr': 'gfrnachckdepi', 'gfr': 'gfrnachckdepi', 'ckdepi': 'gfrnachckdepi',
+    'urea': 'harnstoffs', 'bun': 'harnstoffs', 'harnstoff': 'harnstoffs',
+    'uricacid': 'harnsäures', 'harnsäure': 'harnsäures',
+    # Eisen / Eiweiß
+    'iron': 'eisens', 'fe': 'eisens', 'eisen': 'eisens',
+    'ferritin': 'ferritins', 'transferrin': 'transferrins',
+    'albumin': 'albumins', 'protein': 'proteingesamts', 'totalprotein': 'proteingesamts', 'gesamteiweiß': 'proteingesamts',
+    # Blutbild
+    'wbc': 'leukozyten', 'leukocytes': 'leukozyten', 'leuko': 'leukozyten', 'whitebloodcells': 'leukozyten',
+    'rbc': 'erythrozyten', 'erythrocytes': 'erythrozyten', 'erythro': 'erythrozyten', 'redbloodcells': 'erythrozyten',
+    'plt': 'thrombozyten', 'platelets': 'thrombozyten', 'thrombo': 'thrombozyten',
+    'hb': 'hämoglobinhb', 'hgb': 'hämoglobinhb', 'hemoglobin': 'hämoglobinhb', 'haemoglobin': 'hämoglobinhb',
+    'hkt': 'hämatokrithkt', 'hct': 'hämatokrithkt', 'hematocrit': 'hämatokrithkt', 'haematocrit': 'hämatokrithkt',
+    'mcv': 'mcvmittlereskorpuskuläresvolumen',
+    'mch': 'mchmittlererkorpuskulärerhämoglobingehalt',
+    'mchc': 'mchcmittlerekorpuskulärehämoglobinkonzentration',
+    'stab': 'stabkernige', 'stabkernige': 'stabkernige',
+    'segment': 'segmentkernige', 'segmentkernige': 'segmentkernige', 'neutrophile': 'segmentkernige', 'neutrophils': 'segmentkernige',
+    'lympho': 'lymphozyten', 'lymphocytes': 'lymphozyten', 'lymphozyten': 'lymphozyten',
+    'mono': 'monozyten', 'monocytes': 'monozyten', 'monozyten': 'monozyten',
+    'eos': 'eosinophile', 'eosinophils': 'eosinophile', 'eosinophile': 'eosinophile',
+    'baso': 'basophile', 'basophils': 'basophile', 'basophile': 'basophile',
+    # Stoffwechsel / Fett / Hormone
+    'glucose': 'glukosenüchternvb', 'glukose': 'glukosenüchternvb', 'bz': 'glukosenüchternvb', 'blutzucker': 'glukosenüchternvb',
+    'hba1c': 'hba1c', 'a1c': 'hba1c',
+    'cholesterin': 'cholesterincholesterolgesamts', 'cholesterol': 'cholesterincholesterolgesamts', 'totalcholesterol': 'cholesterincholesterolgesamts',
+    'hdl': 'hdlcholesterins', 'hdlc': 'hdlcholesterins',
+    'ldl': 'ldlcholesterins', 'ldlc': 'ldlcholesterins',
+    'triglyzeride': 'triglyzerides', 'triglycerides': 'triglyzerides', 'triglyceride': 'triglyzerides',
+    'tsh': 'thyreoideastimulierendeshormontshbasals', 'tshbasal': 'thyreoideastimulierendeshormontshbasals',
+    # Gerinnung
+    'quick': 'thromboplastinzeittpzquick', 'tpz': 'thromboplastinzeittpzquick', 'inr': 'thromboplastinzeittpzquick', 'pt': 'thromboplastinzeittpzquick',
+    'aptt': 'aktiviertepartiellethromboplastinzeitaptt', 'ptt': 'aktiviertepartiellethromboplastinzeitaptt'
+}
+
+def clean_test_name(name):
+    """Normalisiert Testnamen für robustes Matching (alphanumerisch, lowercase, inkl. Unicode/Umlaute/Griechisch)."""
+    if not name:
+        return ""
+    return re.sub(r'[^\w]', '', str(name), flags=re.UNICODE).lower()
+
+def normalize_dob(dob_str):
+    """Normalisiert beliebige Datumsformate (1951-06-23, 19510623, 23.06.1951) zu YYYYMMDD."""
+    if not dob_str:
+        return ""
+    digits = re.sub(r'[^0-9]', '', str(dob_str))
+    if len(digits) >= 8:
+        if digits.startswith("19") or digits.startswith("20"):
+            return digits[:8]
+        else:
+            day = digits[:2]
+            month = digits[2:4]
+            year = digits[4:8]
+            return f"{year}{month}{day}"
+    return digits
+
+def load_predefined_lab_values(excel_path):
+    """
+    Lädt vordefinierte Laborwerte aus der Excel-Tabelle mit pandas.
+    Wirft einen Fehler, wenn die Datei nicht existiert oder pandas/openpyxl fehlt.
+    """
+    import pandas as pd
+    if not os.path.exists(excel_path):
+        raise FileNotFoundError(f"Vordefinierte Excel-Datei nicht gefunden: {excel_path}")
+
+    df = pd.read_excel(excel_path)
+    values = {}
+    for _, row in df.iterrows():
+        name = str(row.iloc[0]).strip()
+        val = row.iloc[1]
+        if name and name.lower() != 'laborwert' and pd.notna(val):
+            if isinstance(val, float) and val.is_integer():
+                val = int(val)
+            values[clean_test_name(name)] = str(val)
+
+    print(f"✅ {len(values)} vordefinierte Laborwerte aus Excel geladen.")
+    return values
+
+def find_predefined_value(test_name, predefined_map):
+    """
+    Sucht den passenden Laborwert anhand des Testnamens.
+    Unterstützt exaktes Matching, Aliase (z. B. ALT <-> Alanin-Aminotransferase, WBC <-> Leukozyten),
+    Präfix- und Substring-Matching.
+    Gibt (wert, match_info) zurück oder (None, None).
+    """
+    if not predefined_map or not test_name:
+        return None, None
+    c_name = clean_test_name(test_name)
+    if not c_name:
+        return None, None
+
+    # 1. Direkter exakter Match
+    if c_name in predefined_map:
+        return predefined_map[c_name], f"Exakt '{c_name}'"
+
+    # 2. Alias / Synonym Match (z.B. alt -> alaninaminotransferases, wbc -> leukozyten)
+    for alias, target in TEST_ALIASES.items():
+        if c_name == alias or (len(alias) >= 3 and alias in c_name):
+            if target in predefined_map:
+                return predefined_map[target], f"Alias '{alias}' -> '{target}'"
+
+    # 3. Präfix-Match (z. B. "natriums" <-> "natrium")
+    for key, val in predefined_map.items():
+        if (key.startswith(c_name) or c_name.startswith(key)) and min(len(key), len(c_name)) >= 3:
+            return val, f"Präfix '{key}'"
+
+    # 4. Substring-Match (z. B. "crp" in "creaktivesproteincrps")
+    for key, val in predefined_map.items():
+        if len(c_name) >= 3 and (c_name in key or key in c_name):
+            return val, f"Substring '{key}'"
+
+    return None, None
 
 def get_next_accession_number():
     try:
@@ -185,6 +378,7 @@ def get_test_normal_range(test_id):
         print(f"⚠️ Fehler beim Abrufen der Result Limits für Test {test_id}: {e}")
     return None
 
+
 def generate_gaussian_value_from_range(normal_range, fallback_min=10, fallback_max=50):
     """
     Generiert einen normalverteilten Wert (Gauß-Verteilung) basierend auf dem Normbereich.
@@ -269,10 +463,10 @@ def parse_accession_results_page(html_text):
 
     return tests_by_index
 
-def submit_test_results(session, accession_number, sample_type_name, sample_id=None, fallback_test_ids=None):
+def submit_test_results(session, accession_number, sample_type_name, sample_id=None, fallback_test_ids=None, predefined_values=None):
     """
     Lädt die Seite AccessionResults.do, liest die exakte Test-Reihenfolge von OpenELIS aus,
-    generiert die Gauß-Werte passend zu jedem Test und sendet alle Ergebnisse im Batch.
+    generiert die Werte (vordefiniert oder Gauß) passend zu jedem Test und sendet alle Ergebnisse im Batch.
     """
     encoded_sample_type = urllib.parse.quote(sample_type_name)
     ui_referer = f"https://localhost/openelis/AccessionResults.do?accessionNumber={accession_number}&sampleType={encoded_sample_type}&referer=LabDashboard"
@@ -313,15 +507,26 @@ def submit_test_results(session, accession_number, sample_type_name, sample_id=N
 
             test_name = get_test_name(test_id)
             normal_range = get_test_normal_range(test_id)
-            simulated_value = generate_gaussian_value_from_range(normal_range)
+            predefined_val, match_info = find_predefined_value(test_name, predefined_values)
+
             limit_id = page_limit_id if page_limit_id else (str(normal_range.get("limit_id", "")) if normal_range else "")
-            
             if normal_range and (normal_range.get("low_normal") is not None or normal_range.get("high_normal") is not None):
                 range_str = f"[{normal_range.get('low_normal')}, {normal_range.get('high_normal')}]"
             else:
                 range_str = "Kein Normbereich (Fallback)"
 
-            print(f"📤 [{idx}] {test_name} (ID: {test_id}, Analysis: {analysis_id}): Wert={simulated_value} (Normbereich: {range_str}, Limit ID: {limit_id})")
+            if predefined_val is not None and str(predefined_val).strip() != "" and str(predefined_val).lower() != "nan":
+                simulated_value = predefined_val
+                val_source = f"🎯 Vordefiniert ({match_info})"
+                print(f"📤 [{idx}] {test_name} (ID: {test_id}, Analysis: {analysis_id}): Wert={simulated_value} ({val_source}, Normbereich: {range_str}, Limit ID: {limit_id})")
+            else:
+                simulated_value = generate_gaussian_value_from_range(normal_range)
+                val_source = "🎲 Gauß-Verteilung (Nicht in Excel)"
+                c_name = clean_test_name(test_name)
+                close_matches = difflib.get_close_matches(c_name, list(predefined_values.keys()), n=3, cutoff=0.35) if predefined_values else []
+                close_info = f", Ähnlichste Excel-Einträge: {close_matches}" if close_matches else ""
+                print(f"⚠️ [{idx}] [NICHT IN EXCEL GEFUNDEN] Test: '{test_name}' (ID: {test_id}, Clean: '{c_name}'{close_info})")
+                print(f"    🎲 Generiere stattdessen Gauß-Zufallswert: {simulated_value} (Normbereich: {range_str}, Limit ID: {limit_id})")
 
             form_data_tuples.extend([
                 (f"testResult[{idx}].isModified", "true"),
@@ -356,10 +561,26 @@ def submit_test_results(session, accession_number, sample_type_name, sample_id=N
                     continue
                 test_name = get_test_name(test_id)
                 normal_range = get_test_normal_range(test_id)
-                simulated_value = generate_gaussian_value_from_range(normal_range)
+                predefined_val, match_info = find_predefined_value(test_name, predefined_values)
+
                 limit_id = str(normal_range.get("limit_id", "")) if normal_range else ""
-                
-                print(f"📤 [{idx}] {test_name} (ID: {test_id}, Analysis: {analysis_id}): Wert={simulated_value}")
+                if normal_range and (normal_range.get("low_normal") is not None or normal_range.get("high_normal") is not None):
+                    range_str = f"[{normal_range.get('low_normal')}, {normal_range.get('high_normal')}]"
+                else:
+                    range_str = "Kein Normbereich (Fallback)"
+
+                if predefined_val is not None and str(predefined_val).strip() != "" and str(predefined_val).lower() != "nan":
+                    simulated_value = predefined_val
+                    val_source = f"🎯 Vordefiniert ({match_info})"
+                    print(f"📤 [{idx}] {test_name} (ID: {test_id}, Analysis: {analysis_id}): Wert={simulated_value} ({val_source})")
+                else:
+                    simulated_value = generate_gaussian_value_from_range(normal_range)
+                    val_source = "🎲 Gauß-Verteilung (Nicht in Excel)"
+                    c_name = clean_test_name(test_name)
+                    close_matches = difflib.get_close_matches(c_name, list(predefined_values.keys()), n=3, cutoff=0.35) if predefined_values else []
+                    close_info = f", Ähnlichste Excel-Einträge: {close_matches}" if close_matches else ""
+                    print(f"⚠️ [{idx}] [NICHT IN EXCEL GEFUNDEN] Test: '{test_name}' (ID: {test_id}, Clean: '{c_name}'{close_info})")
+                    print(f"    🎲 Generiere stattdessen Gauß-Zufallswert: {simulated_value} (Normbereich: {range_str}, Limit ID: {limit_id})")
 
                 form_data_tuples.extend([
                     (f"testResult[{idx}].isModified", "true"),
@@ -408,12 +629,47 @@ def submit_test_results(session, accession_number, sample_type_name, sample_id=N
         return False
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Verwendung: python3 openelis_importer.py <encounterUuid>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="OpenELIS Lab Simulator")
+    parser.add_argument("encounter_uuid", help="UUID des Encounters")
+    parser.add_argument("extra_args", nargs="*", help="Optionale Positional-Argumente (patient_id, patient_uuid)")
+    parser.add_argument("--patient-id", dest="patient_id", default=None)
+    parser.add_argument("--patient-uuid", dest="patient_uuid", default=None)
+    parser.add_argument("--ward", dest="ward", default=None)
+    parser.add_argument("--dob", dest="dob", default=None)
+    args = parser.parse_args()
 
-    encounter_uuid = sys.argv[1]
+    encounter_uuid = args.encounter_uuid
+    patient_id = args.patient_id
+    patient_uuid = args.patient_uuid
+    ward = args.ward
+    dob = args.dob
+
+    # Falls patient_id / patient_uuid positional übergeben wurden (Rückwärtskompatibilität)
+    if args.extra_args:
+        if not patient_id and len(args.extra_args) >= 1:
+            patient_id = args.extra_args[0]
+        if not patient_uuid and len(args.extra_args) >= 2:
+            patient_uuid = args.extra_args[1]
+
     print(f"🚀 Starte LIS-Import für Encounter: {encounter_uuid}")
+
+    # 1. Prüfen, ob Ward und DOB übergeben wurden (kein REST-Fallback!)
+    if not ward or not dob:
+        print("❌ 'ward' oder 'dob' wurde nicht als Parameter übergeben. Abbruch (Patient muss manuell eingetragen werden).")
+        sys.exit(0)
+
+    # 2. Kriterien prüfen: Station = Kardiologie und Geburtsdatum = 23.06.1951
+    norm_dob = normalize_dob(dob)
+    ward_str = str(ward).strip()
+    is_target_ward = TARGET_WARD in ward_str.lower()
+    is_target_dob = (norm_dob == TARGET_DOB)
+
+    if not (is_target_ward and is_target_dob):
+        print(f"ℹ️ Patient stimmt nicht mit Zielkriterien überein (Station: '{ward_str}', DOB: '{dob}'). Abbruch (Patient wird nicht automatisch bearbeitet).")
+        sys.exit(0)
+
+    print(f"🎯 Match für Zielpatient! Station: '{ward_str}', Geburtsdatum: '{dob}' (normalisiert: {norm_dob})")
+    predefined_values = load_predefined_lab_values(EXCEL_PATH)
 
     session = Session()
     session.auth = ELIS_AUTH
@@ -446,5 +702,6 @@ if __name__ == "__main__":
                 accession_number=accession_number, 
                 sample_type_name=sample_type_name, 
                 sample_id=sample_id, 
-                fallback_test_ids=config['test_ids']
+                fallback_test_ids=config['test_ids'],
+                predefined_values=predefined_values
             )

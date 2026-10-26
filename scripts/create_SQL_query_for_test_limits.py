@@ -95,3 +95,5 @@ with open(output_file, 'w', encoding='utf-8') as f:
     f.write("\n".join(inserts))
 
 print(f"Erfolgreich {total_processed} UPSERT-Statements für Result Limits generiert -> {output_file}")
+# sudo docker cp /home/kislab/KIS-Projekt/scripts/insert_result_limits.sql bahmni-standard-openelisdb-1:/
+# sudo docker exec -it bahmni-standard-openelisdb-1 psql -U clinlims -d clinlims -f /insert_result_limits.sql

@@ -24,3 +24,5 @@ hs_err_pid*
 replay_pid*
 standard-config/masterdata/configuration/concepts/fhir2Extension.csv 
 __pycache__
+.venv/
+venv/
