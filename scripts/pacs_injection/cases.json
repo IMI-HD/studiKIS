@@ -1,0 +1,14 @@
+[
+    {
+        "name": "Rolf Hertz - Herzinsuffizienz",
+        "ward": "kardiologie",
+        "dob": "1951-06-23",
+        "studies": [
+            {
+                "procedure": ["angiography", "angiographie", "ventrikulografie"],
+                "file": "Ventrikulografie mit mittelgradig reduzierter LVEF.mp4",
+                "description": "Ventrikulografie - mittelgradig reduzierte LVEF"
+            }
+        ]
+    }
+]
