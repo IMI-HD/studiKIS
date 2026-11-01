@@ -3,6 +3,7 @@ import io
 import json
 import time
 import glob
+import re
 from datetime import datetime
 from pydicom import dcmread
 from pydicom.dataset import Dataset, FileMetaDataset
@@ -10,18 +11,28 @@ from pydicom.sequence import Sequence
 from pydicom.uid import generate_uid, ExplicitVRLittleEndian
 from pynetdicom import AE
 from PIL import Image, ImageDraw, ImageFont
+import requests
+import urllib3
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 # 1. DEINE ANGEPASSTEN PFADE
 TRIGGER_DIR = "/var/lib/docker/volumes/bahmni-standard_mirth_pacs_data/_data/triggers"
 TEMPLATE_FILE = "/home/kislab/dicom_images/gesicht_roentgen.dcm"
 IMAGE_DIR = "/home/kislab/dicom_images"
+# Fall-Konfiguration (Station + Geburtsdatum -> vorgefertigte Bildgebung). Bildpfade darin relativ zu IMAGE_DIR.
+CASES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cases.json")
+VIDEO_MAX_WIDTH = 1024  # MP4 werden für unkomprimiertes Multi-Frame-DICOM auf diese Breite verkleinert
 
 # 2. PACS VERBINDUNGSDATEN (dcm4chee DICOM-Port, standardmäßig 11112)
 PACS_IP = "127.0.0.1"   # Da Port 11112 auf den Host weitergeleitet ist (0.0.0.0:11112->11112)
 PACS_PORT = 11112       # Der DICOM-Port aus docker ps
 PACS_AET = "DCM4CHEE"   # Der Standard AE-Title von dcm4chee in Bahmni
+
+# OpenMRS REST (Geburtsdatum + Station stehen NICHT in der HL7-Nachricht und werden hier nachgeladen)
+OPENMRS_REST_URL = "https://localhost/openmrs/ws/rest/v1"
+OPENMRS_AUTH = ("superman", "Admin123")
 
 # 3. BOILERPLATE BEFUND-TEMPLATE (zum Testen; kann später durch vorgefertigte Reports ersetzt werden)
 REPORT_BOILERPLATE_TEMPLATE = """============================================================
@@ -273,6 +284,212 @@ def create_report_pdf_dataset(report_text, patient_id, patient_name, accession_n
     return report_ds
 
 
+def normalize_dob(dob_str):
+    """Normalisiert beliebige Datumsformate (1951-06-23, 19510623, 23.06.1951) zu YYYYMMDD."""
+    if not dob_str:
+        return ""
+    digits = re.sub(r'[^0-9]', '', str(dob_str))
+    if len(digits) >= 8:
+        if digits.startswith("19") or digits.startswith("20"):
+            return digits[:8]
+        else:
+            day = digits[:2]
+            month = digits[2:4]
+            year = digits[4:8]
+            return f"{year}{month}{day}"
+    return digits
+
+
+def openmrs_get(path, params=None):
+    response = requests.get(
+        f"{OPENMRS_REST_URL}/{path}",
+        params=params,
+        auth=OPENMRS_AUTH,
+        headers={"Accept": "application/json"},
+        verify=False,
+        timeout=10
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def lookup_patient_context(patient_identifier, accession_number):
+    """
+    Holt Geburtsdatum und Station aus OpenMRS.
+    Station = Location des Encounters, in dem die Radiologie-Order angelegt wurde
+    (entspricht encounterData.locationName im Lab-Channel von Mirth).
+    """
+    patients = openmrs_get("patient", {
+        "identifier": patient_identifier,
+        "v": "custom:(uuid,person:(birthdate))"
+    }).get("results", [])
+    if not patients:
+        print(f"[!] Patient '{patient_identifier}' nicht in OpenMRS gefunden.")
+        return "", ""
+
+    patient_uuid = patients[0]["uuid"]
+    dob = ((patients[0].get("person") or {}).get("birthdate") or "")[:10]  # "1951-06-23"
+
+    # a) Encounter der Order über die Accession-/Order-Nummer finden
+    encounter_uuid = None
+    orders = openmrs_get("order", {
+        "patient": patient_uuid,
+        "v": "custom:(orderNumber,accessionNumber,encounter:(uuid))"
+    }).get("results", [])
+    for order in orders:
+        if accession_number and accession_number in (order.get("orderNumber"), order.get("accessionNumber")):
+            encounter_uuid = (order.get("encounter") or {}).get("uuid")
+            break
+
+    if encounter_uuid:
+        encounter = openmrs_get(f"encounter/{encounter_uuid}", {"v": "custom:(location:(display))"})
+        ward = (encounter.get("location") or {}).get("display") or ""
+    else:
+        # b) Fallback: Location des jüngsten Encounters des Patienten
+        print(f"[!] Keine Order zu Accession '{accession_number}' gefunden -> nutze jüngsten Encounter.")
+        encounters = openmrs_get("encounter", {
+            "patient": patient_uuid,
+            "v": "custom:(encounterDatetime,location:(display))"
+        }).get("results", [])
+        latest = max(encounters, key=lambda e: e.get("encounterDatetime") or "", default={})
+        ward = (latest.get("location") or {}).get("display") or ""
+
+    return dob, ward
+
+
+def load_cases(cases_file):
+    """
+    Lädt die Fall-Konfiguration. Wird bei JEDEM Auftrag neu gelesen,
+    d.h. neue Fälle/Bilder sind ohne Neustart des Injektors aktiv.
+    """
+    if not os.path.exists(cases_file):
+        print(f"[!] Keine Fall-Konfiguration gefunden: {cases_file}")
+        return []
+    with open(cases_file, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def find_case_study(cases, ward, dob, procedure):
+    """
+    Sucht den Fall, dessen Station (Teilstring) UND Geburtsdatum passen,
+    und darin die Untersuchung, deren Stichwort im Untersuchungsnamen vorkommt.
+    """
+    norm_dob = normalize_dob(dob)
+    ward_lower = str(ward or "").strip().lower()
+    procedure_lower = str(procedure or "").strip().lower()
+    if not norm_dob or not ward_lower:
+        return None, None
+
+    for case in cases:
+        case_ward = str(case.get('ward', '')).strip().lower()
+        if normalize_dob(case.get('dob')) != norm_dob or not case_ward or case_ward not in ward_lower:
+            continue
+        for study in case.get('studies', []):
+            keywords = study.get('procedure', [])
+            if isinstance(keywords, str):
+                keywords = [keywords]
+            if any(k.strip().lower() in procedure_lower for k in keywords if k.strip()):
+                return case, study
+    return None, None
+
+
+def find_legacy_png(patient_name, procedure):
+    """
+    Bisherige Suche: PNG in IMAGE_DIR, dessen Dateiname Patientenname und/oder Untersuchung enthält.
+    """
+    clean_patient_name = str(patient_name).replace(" ", "").lower()
+    clean_procedure = str(procedure).replace(" ", "").lower()
+    png_files = [f_name for f_name in os.listdir(IMAGE_DIR) if f_name.lower().endswith('.png')]
+
+    # a) Suche nach patient_name UND procedure in Dateinamen
+    for f_name in png_files:
+        clean_f = f_name.replace(" ", "").lower()
+        if clean_patient_name and clean_procedure and (clean_patient_name in clean_f) and (clean_procedure in clean_f):
+            return os.path.join(IMAGE_DIR, f_name)
+
+    # b) Wenn a nicht gefunden wurde, suche nur nach procedure
+    for f_name in png_files:
+        clean_f = f_name.replace(" ", "").lower()
+        if clean_procedure and (clean_procedure in clean_f):
+            return os.path.join(IMAGE_DIR, f_name)
+    return None
+
+
+def build_report_text(study, patient_name, patient_id, accession_number, procedure):
+    """
+    Nutzt die im Fall hinterlegte Befundvorlage (Textdatei, relativ zu IMAGE_DIR) oder das Boilerplate.
+    Platzhalter wie {patient_name} oder {date} werden in beiden Fällen ersetzt.
+    """
+    template = REPORT_BOILERPLATE_TEMPLATE
+    report_file = (study or {}).get('report')
+    if report_file:
+        report_path = os.path.join(IMAGE_DIR, report_file)
+        if os.path.exists(report_path):
+            with open(report_path, 'r', encoding='utf-8') as f:
+                template = f.read()
+        else:
+            print(f"[!] Befundvorlage nicht gefunden: {report_path} -> nutze Boilerplate")
+
+    try:
+        return template.format(
+            patient_name=patient_name if patient_name else "Unbekannt",
+            patient_id=patient_id if patient_id else "-",
+            accession_number=accession_number if accession_number else "-",
+            procedure=procedure if procedure else "Radiologische Untersuchung",
+            date=datetime.now().strftime("%d.%m.%Y %H:%M")
+        )
+    except (KeyError, IndexError, ValueError):
+        # Vorlage enthält unbekannte/ungültige geschweifte Klammern -> unverändert verwenden
+        return template
+
+
+def create_png_dataset(template_file, png_path):
+    """PNG in DICOM konvertieren (Pixeldaten und Dimensionen der Vorlage überschreiben)."""
+    ds = dcmread(template_file)
+    img = Image.open(png_path)
+    img_gray = img.convert('L')
+
+    ds.Rows = img_gray.height
+    ds.Columns = img_gray.width
+    ds.PixelData = img_gray.tobytes()
+
+    # Auf 8-Bit Grayscale Metadaten anpassen
+    ds.BitsAllocated = 8
+    ds.BitsStored = 8
+    ds.HighBit = 7
+    ds.PixelRepresentation = 0
+    ds.SamplesPerPixel = 1
+    ds.PhotometricInterpretation = "MONOCHROME2"
+
+    # Auf 1 Frame reduzieren (falls das Template Multi-Frame war)
+    ds.NumberOfFrames = 1
+    for attr in ['FrameTime', 'FrameTimeVector', 'FrameIncrementPointer']:
+        if hasattr(ds, attr):
+            delattr(ds, attr)
+
+    if 'PlanarConfiguration' in ds:
+        del ds.PlanarConfiguration
+    return ds
+
+
+def create_image_dataset(image_path):
+    """
+    Erzeugt das Bild-DICOM je nach Dateityp:
+    .mp4 -> Multi-Frame XA (Cine), .dcm -> fertiges DICOM übernehmen, sonst -> PNG/JPG über Vorlage.
+    Patienten- und Studiendaten werden danach in process_json_trigger überschrieben.
+    """
+    ext = os.path.splitext(image_path)[1].lower()
+    if ext == '.mp4':
+        # Lazy Import: OpenCV wird nur benötigt, wenn tatsächlich ein Video verarbeitet wird
+        from mp4_to_dicom import read_video_frames, create_video_dataset
+        frames, fps = read_video_frames(image_path, max_width=VIDEO_MAX_WIDTH)
+        print(f"[*] Video eingelesen: {len(frames)} Frames, {frames[0].shape[1]}x{frames[0].shape[0]} px, {fps:.2f} fps")
+        return create_video_dataset(frames, fps, "", "", "", generate_uid(), "")
+    if ext == '.dcm':
+        return dcmread(image_path)
+    return create_png_dataset(TEMPLATE_FILE, image_path)
+
+
 def process_json_trigger(file_path):
     # JSON-Daten von Mirth einlesen
     with open(file_path, 'r') as f:
@@ -283,64 +500,51 @@ def process_json_trigger(file_path):
     patient_name = data.get('patient_name', '')
     accession_number = data.get('accession_number', '')
     procedure = data.get('procedure', '')
+    dob = data.get('dob', '')
+    ward = data.get('ward', '')
+
+    # Geburtsdatum/Station sind nicht in der HL7-Nachricht -> aus OpenMRS nachladen
+    if not (dob and ward):
+        try:
+            looked_up_dob, looked_up_ward = lookup_patient_context(patient_id, accession_number)
+            dob = dob or looked_up_dob
+            ward = ward or looked_up_ward
+        except Exception as lookup_err:
+            print(f"[!] OpenMRS-Abfrage fehlgeschlagen ({lookup_err}) -> nur bisherige PNG-Suche möglich.")
 
     print(f"    Patienten-ID: {patient_id}")
     print(f"    Patienten-Name: {patient_name}")
     print(f"    Accession-Nr: {accession_number}")
     print(f"    Untersuchung: {procedure}")
+    print(f"    Geburtsdatum: {dob}")
+    print(f"    Station: {ward}")
 
-    # PNG-Suche in IMAGE_DIR
-    clean_patient_name = str(patient_name).replace(" ", "").lower()
-    clean_procedure = str(procedure).replace(" ", "").lower()
-
-    # PNGs auflisten
-    png_files = []
-    if os.path.exists(IMAGE_DIR):
-        for f_name in os.listdir(IMAGE_DIR):
-            if f_name.lower().endswith('.png'):
-                png_files.append(f_name)
-    else:
+    if not os.path.exists(IMAGE_DIR):
         print(f"[X] FEHLER: Bildverzeichnis existiert nicht: {IMAGE_DIR}")
         os.remove(file_path)
         print("[*] Trigger-Datei bereinigt. Warte auf nächsten Auftrag...")
         return
 
-    # a) Suche nach patient_name UND procedure in Dateinamen
-    found_png = None
-    for f_name in png_files:
-        clean_f = f_name.replace(" ", "").lower()
-        if clean_patient_name and clean_procedure and (clean_patient_name in clean_f) and (clean_procedure in clean_f):
-            found_png = f_name
-            break
+    # 1. Vorgefertigter Fall (Station + Geburtsdatum + Untersuchung) aus cases.json
+    case, study = find_case_study(load_cases(CASES_FILE), ward, dob, procedure)
+    if study:
+        image_path = os.path.join(IMAGE_DIR, study['file'])
+        print(f"[+] Fall '{case.get('name', '?')}' erkannt -> {image_path}")
+    else:
+        # 2. Fallback: bisherige PNG-Suche über den Dateinamen
+        image_path = find_legacy_png(patient_name, procedure)
 
-    # b) Wenn a nicht gefunden wurde, suche nur nach procedure
-    if not found_png:
-        for f_name in png_files:
-            clean_f = f_name.replace(" ", "").lower()
-            if clean_procedure and (clean_procedure in clean_f):
-                found_png = f_name
-                break
-
-    if not found_png:
-        print(f"[X] FEHLER: Kein passendes PNG-Bild fuer Patient '{patient_name}' und Untersuchung '{procedure}' gefunden.")
+    if not image_path or not os.path.exists(image_path):
+        print(f"[i] Kein Bild für Patient '{patient_name}' / Untersuchung '{procedure}' hinterlegt. Auftrag wird ignoriert.")
         # Trigger-Datei löschen, damit sie nicht doppelt verarbeitet wird
         os.remove(file_path)
         print("[*] Trigger-Datei bereinigt. Warte auf nächsten Auftrag...")
         return
 
-    png_path = os.path.join(IMAGE_DIR, found_png)
-    print(f"[+] Passendes PNG-Bild gefunden: {png_path}")
+    print(f"[+] Verwende Bilddatei: {image_path}")
 
-    # Befundtext generieren (Boilerplate-Template für Testzwecke)
-    # Kann später durch Laden vorgefertigter Befundberichte ersetzt werden
-    report_text = REPORT_BOILERPLATE_TEMPLATE.format(
-        patient_name=patient_name if patient_name else "Unbekannt",
-        patient_id=patient_id if patient_id else "-",
-        accession_number=accession_number if accession_number else "-",
-        procedure=procedure if procedure else "Radiologische Untersuchung",
-        date=datetime.now().strftime("%d.%m.%Y %H:%M")
-    )
-    print(f"[*] Boilerplate-Befund generiert für '{procedure}' ({patient_name})")
+    report_text = build_report_text(study, patient_name, patient_id, accession_number, procedure)
+    print(f"[*] Befund generiert für '{procedure}' ({patient_name})")
 
     if not os.path.exists(TEMPLATE_FILE):
         print(f"[X] FEHLER: Die Bildvorlage fehlt unter: {TEMPLATE_FILE}")
@@ -348,37 +552,11 @@ def process_json_trigger(file_path):
         print("[*] Trigger-Datei bereinigt. Warte auf nächsten Auftrag...")
         return
 
-    # DICOM-Vorlage laden
-    print(f"[*] Lade Bildvorlage und manipuliere DICOM-Header...")
-    ds = dcmread(TEMPLATE_FILE)
-
-    # PNG in DICOM konvertieren (Pixeldaten und Dimensionen überschreiben)
+    print(f"[*] Erzeuge Bild-DICOM und manipuliere DICOM-Header...")
     try:
-        img = Image.open(png_path)
-        img_gray = img.convert('L')
-        
-        ds.Rows = img_gray.height
-        ds.Columns = img_gray.width
-        ds.PixelData = img_gray.tobytes()
-        
-        # Auf 8-Bit Grayscale Metadaten anpassen
-        ds.BitsAllocated = 8
-        ds.BitsStored = 8
-        ds.HighBit = 7
-        ds.PixelRepresentation = 0
-        ds.SamplesPerPixel = 1
-        ds.PhotometricInterpretation = "MONOCHROME2"
-        
-        # Auf 1 Frame reduzieren (falls das Template Multi-Frame war)
-        ds.NumberOfFrames = 1
-        for attr in ['FrameTime', 'FrameTimeVector', 'FrameIncrementPointer']:
-            if hasattr(ds, attr):
-                delattr(ds, attr)
-        
-        if 'PlanarConfiguration' in ds:
-            del ds.PlanarConfiguration
+        ds = create_image_dataset(image_path)
     except Exception as img_err:
-        print(f"[X] FEHLER bei der PNG-Konvertierung: {img_err}")
+        print(f"[X] FEHLER bei der Bild-Konvertierung: {img_err}")
         os.remove(file_path)
         print("[*] Trigger-Datei bereinigt. Warte auf nächsten Auftrag...")
         return
@@ -391,6 +569,8 @@ def process_json_trigger(file_path):
     ds.PatientID = patient_id
     ds.PatientName = patient_name if patient_name else "Patient^Bahmni"
     ds.AccessionNumber = accession_number
+    if dob:
+        ds.PatientBirthDate = normalize_dob(dob)
     ds.StudyInstanceUID = shared_study_uid
     ds.SeriesInstanceUID = generate_uid()
     ds.SOPInstanceUID = generate_uid()
@@ -398,7 +578,8 @@ def process_json_trigger(file_path):
         ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
     ds.SeriesNumber = 1
     ds.InstanceNumber = 1
-    ds.SeriesDescription = f"Roentgen - {procedure}" if procedure else "Roentgenbild"
+    ds.StudyDescription = f"Radiology Order - {procedure}" if procedure else "Radiology Order"
+    ds.SeriesDescription = (study or {}).get('description') or (f"Roentgen - {procedure}" if procedure else "Roentgenbild")
     ds.SpecificCharacterSet = "ISO_IR 192"
     # Befundtext auch direkt am Röntgenbild als ImageComment & StudyComment hinterlegen
     ds.ImageComments = report_text
@@ -484,4 +665,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
+    # sudo ~/.venv/bahmni/bin/python KIS-Projekt/scripts/pacs_injector/pacs_injector.py

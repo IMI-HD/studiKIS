@@ -8,8 +8,6 @@ from pydicom.tag import Tag
 from pydicom.uid import generate_uid, ExplicitVRLittleEndian
 from pynetdicom import AE
 
-from pacs_injector import PACS_IP, PACS_PORT, PACS_AET
-
 
 # 1. STANDARDPFADE
 DEFAULT_VIDEO = "/home/kislab/dicom_images/Ventrikulografie mit mittelgradig reduzierter LVEF.mp4"
@@ -146,6 +144,9 @@ def save_dataset(ds, output_path):
 
 
 def send_to_pacs(ds):
+    # Lazy Import, da pacs_injector dieses Modul seinerseits importiert (kein Zirkelimport)
+    from pacs_injector import PACS_IP, PACS_PORT, PACS_AET
+
     ae = AE(ae_title=PACS_AET)
     ae.add_requested_context(ds.file_meta.MediaStorageSOPClassUID)
 
@@ -203,3 +204,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    # sudo ~/.venv/bahmni/bin/python KIS-Projekt/scripts/pacs_injection/mp4_to_dicom.py
