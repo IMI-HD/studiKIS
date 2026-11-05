@@ -11,9 +11,10 @@ Usage from pacs_injector.py:
 
 CLI:
     python openmrs_report.py check                                  # verify configuration
-    python openmrs_report.py setup                                  # create concept if missing, then check
+    python openmrs_report.py setup                                  # create concept + encounter type if missing, then check
     python openmrs_report.py test <patient> <order_number> [text]   # write a test finding
         <patient> may be the patient UUID or the patient identifier (e.g. GAN203006)
+    python openmrs_report.py void <encounter_uuid>                  # void (soft-delete) an encounter
 """
 
 import re
@@ -33,7 +34,9 @@ OPENMRS_AUTH = ("superman", "Admin123")
 VERIFY_SSL = False                      # Bahmni Docker uses a self-signed certificate
 
 REPORT_CONCEPT_NAME = "Radiology Finding"
-ENCOUNTER_TYPE_NAME = "RADIOLOGY"
+# Must NOT be "RADIOLOGY": the dashboard section "radiology" (documents control) loads all
+# RADIOLOGY encounters and expects every obs to be a document obs group -> UI crash.
+ENCOUNTER_TYPE_NAME = "Radiology Report"
 LOCATION_NAME = "Radiology"             # must be an existing location
 VISIT_TYPE = "OPD"                      # must be an existing visit type
 SET_FULFILLER_STATUS = True             # mark order as COMPLETED (OpenMRS >= 2.2)
@@ -185,6 +188,32 @@ def setup_concept():
     return r.json()["uuid"]
 
 
+def setup_encounter_type():
+    """Create the encounter type for findings if it does not exist yet."""
+    try:
+        uuid = lookup_uuid("encountertype", ENCOUNTER_TYPE_NAME)
+        print(f"Encounter type already exists: {uuid}")
+        return uuid
+    except LookupError:
+        pass
+    r = session.post(f"{OPENMRS_REST_URL}/encountertype",
+                     json={"name": ENCOUNTER_TYPE_NAME,
+                           "description": "Radiology finding (text) linked to a radiology order"},
+                     timeout=15)
+    r.raise_for_status()
+    print(f"Encounter type created: {r.json()['uuid']}")
+    return r.json()["uuid"]
+
+
+def void_encounter(encounter_uuid):
+    """Void (soft-delete) an encounter including its observations."""
+    r = session.delete(f"{OPENMRS_REST_URL}/encounter/{encounter_uuid}",
+                       params={"reason": "removed by openmrs_report.py"}, timeout=15)
+    if not r.ok:
+        raise RuntimeError(f"void failed ({r.status_code}): {r.text[:500]}")
+    print(f"Encounter voided: {encounter_uuid}")
+
+
 def check_config():
     ok = True
     for resource, name in [("concept", REPORT_CONCEPT_NAME),
@@ -214,9 +243,12 @@ if __name__ == "__main__":
         sys.exit(0 if check_config() else 1)
     elif cmd == "setup":
         setup_concept()
+        setup_encounter_type()
         sys.exit(0 if check_config() else 1)
     elif cmd == "test" and len(sys.argv) >= 4:
         text = sys.argv[4] if len(sys.argv) >= 5 else None
         publish_report(sys.argv[2], sys.argv[3], text)
+    elif cmd == "void" and len(sys.argv) >= 3:
+        void_encounter(sys.argv[2])
     else:
         print(__doc__)
