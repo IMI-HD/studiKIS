@@ -108,7 +108,8 @@
                 "displayOrder": 14,
                 "dashboardConfig": {
                     "conceptNames": [
-                        "Summary"
+                        "Summary",
+                        "Radiology Finding"
                     ],
                     "numberOfVisits": 4
                 }
@@ -122,31 +123,6 @@
                     "pacsImageUrl": "/oviyam2/oviyam?patientID={{patientID}}&accessionNumber={{orderNumber}}",
                     "numberOfVisits": 4
                 }
-            },
-            "radiologyFinding": {
-                "translationKey": "Radiology Finding",
-                "type": "observation",
-                "isObservation": true,
-                "displayOrder": 11,
-                "dashboardConfig": {
-                    "conceptNames": [
-                        "Radiology Finding"
-                    ],
-                    "filterObsWithOrders": false,
-                    "displayNameType": "FSN",
-                    "showDetailsButton": true,
-                    "numberOfVisits": 5
-                },
-                "expandedViewConfig": {
-                    "conceptNames": [
-                        "Radiology Finding"
-                    ],
-                    "filterObsWithOrders": false,
-                    "displayNameType": "FSN",
-                    "showDetailsButton": true,
-                    "numberOfVisits": 10
-                },
-                "hideEmptyDisplayControl": true
             },
             "labOrdersDisplayControl": {
                 "translationKey": "DASHBOARD_TITLE_LAB_ORDERS_DISPLAY_CONTROL_KEY",
