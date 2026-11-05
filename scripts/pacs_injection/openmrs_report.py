@@ -80,6 +80,10 @@ def lookup_uuid(resource, name):
     results = _get(resource, q=name).get("results", [])
     match = next((x for x in results if x.get("display", "").lower() == name.lower()), None)
     if match is None:
+        # Some resources (e.g. conceptdatatype, conceptclass) ignore/refuse "q" -> list all
+        results = _get(resource, limit=100).get("results", [])
+        match = next((x for x in results if x.get("display", "").lower() == name.lower()), None)
+    if match is None:
         found = ", ".join(x.get("display", "?") for x in results[:5]) or "-"
         raise LookupError(f"{resource} '{name}' not found (similar: {found})")
     _cache[key] = match["uuid"]
