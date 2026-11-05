@@ -1,9 +1,15 @@
 """
 openmrs_report.py - store radiology findings as text observations in Bahmni/OpenMRS.
 
-The finding is saved with the concept "Radiology Finding" and linked to the
-radiology order, so it shows up in the clinical dashboard section
-"radiologyFinding" (standard-config/openmrs/apps/clinical/dashboard.json).
+The finding is saved with the concept "Radiology Finding" and shows up in the
+clinical dashboard section "radiologyFinding"
+(standard-config/openmrs/apps/clinical/dashboard.json).
+
+The obs is deliberately NOT linked to the order via obs.order: Bahmni's dashboard
+query (bahmnicore/observations) hides order-linked obs by default, and the orders
+control did not return them on our instance either. Instead the order number is
+stored in the obs comment ("Order ORD-123"), which is also shown in the dashboard
+and used to detect duplicates.
 
 Usage from pacs_injector.py:
     from openmrs_report import publish_report_for_order
@@ -98,18 +104,26 @@ def find_order(patient_uuid, order_number):
     raise LookupError(f"order {order_number} for patient {patient_uuid} not found (or no longer active)")
 
 
-def report_exists(patient_uuid, order_uuid):
-    """Prevent duplicate findings if a trigger is processed twice."""
+def order_comment(order_number):
+    return f"Order {order_number}"
+
+
+def get_order_number(order_uuid):
+    return _get(f"order/{order_uuid}", v="custom:(orderNumber)")["orderNumber"]
+
+
+def report_exists(patient_uuid, order_number):
+    """Prevent duplicate findings if a trigger is processed twice (matched via obs comment)."""
     concept_uuid = lookup_uuid("concept", REPORT_CONCEPT_NAME)
     obs = _get("obs", patient=patient_uuid, concept=concept_uuid,
-               v="custom:(uuid,order:(uuid))").get("results", [])
-    return any((o.get("order") or {}).get("uuid") == order_uuid for o in obs)
+               v="custom:(uuid,comment)").get("results", [])
+    return any(o.get("comment") == order_comment(order_number) for o in obs)
 
 
 # --------------------------------------------------------------------------
 # Write finding
 # --------------------------------------------------------------------------
-def post_report(patient_uuid, order_uuid, report_text):
+def post_report(patient_uuid, order_number, report_text):
     payload = {
         "patientUuid": patient_uuid,
         "visitType": VISIT_TYPE,
@@ -119,7 +133,7 @@ def post_report(patient_uuid, order_uuid, report_text):
             "concept": {"uuid": lookup_uuid("concept", REPORT_CONCEPT_NAME),
                         "name": REPORT_CONCEPT_NAME},
             "value": report_text,
-            "orderUuid": order_uuid,
+            "comment": order_comment(order_number),
         }],
     }
     r = session.post(f"{OPENMRS_REST_URL}/bahmnicore/bahmniencounter", json=payload, timeout=30)
@@ -141,10 +155,11 @@ def publish_report_for_order(patient_uuid, order_uuid, report_text):
     Main entry point for pacs_injector.py (patient and order UUID already known).
     Returns the encounter UUID, or None if a finding for this order already exists.
     """
-    if report_exists(patient_uuid, order_uuid):
-        log(f"finding for order {order_uuid} already exists - skipped")
+    order_number = get_order_number(order_uuid)
+    if report_exists(patient_uuid, order_number):
+        log(f"finding for order {order_number} already exists - skipped")
         return None
-    result = post_report(patient_uuid, order_uuid, report_text)
+    result = post_report(patient_uuid, order_number, report_text)
     if SET_FULFILLER_STATUS:
         mark_order_completed(order_uuid)
     enc = result.get("encounterUuid")
