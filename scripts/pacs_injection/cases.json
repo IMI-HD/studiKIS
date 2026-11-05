@@ -5,9 +5,19 @@
         "dob": "1951-06-23",
         "studies": [
             {
-                "procedure": ["angiography", "angiographie", "ventrikulografie"],
+                "procedure": ["angiogram", "angiography", "angiographie", "ventrikulografie"],
                 "file": "Ventrikulografie mit mittelgradig reduzierter LVEF.mp4",
-                "description": "Ventrikulografie - mittelgradig reduzierte LVEF"
+                "description": "Ventrikulografie - mittelgradig reduzierte LVEF",
+                "report": "rolf_hertz_angiogram.txt"
+            },
+            {
+                "procedure": ["echocardiogra", "echokardiogra"],
+                "report": "rolf_hertz_echocardiogram.txt"
+            },
+            {
+                "procedure": ["electrocardiogra", "ekg", "ecg"],
+                "concept": "ECG Finding",
+                "report": "rolf_hertz_ecg.txt"
             }
         ]
     }

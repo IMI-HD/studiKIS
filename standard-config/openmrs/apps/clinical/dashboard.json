@@ -146,6 +146,29 @@
                 },
                 "hideEmptyDisplayControl": true
             },
+            "ecgFinding": {
+                "translationKey": "ECG Finding",
+                "type": "observation",
+                "isObservation": true,
+                "displayOrder": 11,
+                "dashboardConfig": {
+                    "conceptNames": [
+                        "ECG Finding"
+                    ],
+                    "displayNameType": "FSN",
+                    "showDetailsButton": true,
+                    "numberOfVisits": 5
+                },
+                "expandedViewConfig": {
+                    "conceptNames": [
+                        "ECG Finding"
+                    ],
+                    "displayNameType": "FSN",
+                    "showDetailsButton": true,
+                    "numberOfVisits": 10
+                },
+                "hideEmptyDisplayControl": true
+            },
             "labOrdersDisplayControl": {
                 "translationKey": "DASHBOARD_TITLE_LAB_ORDERS_DISPLAY_CONTROL_KEY",
                 "type": "ordersControl",
