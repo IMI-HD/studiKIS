@@ -37,7 +37,7 @@ REPORT_CONCEPT_NAME = "Radiology Finding"
 # Must NOT be "RADIOLOGY": the dashboard section "radiology" (documents control) loads all
 # RADIOLOGY encounters and expects every obs to be a document obs group -> UI crash.
 ENCOUNTER_TYPE_NAME = "Radiology Report"
-LOCATION_NAME = "Radiology"             # must be an existing location
+LOCATION_NAME = "Kardiologie"           # must be an existing location (ward where students log in)
 VISIT_TYPE = "OPD"                      # must be an existing visit type
 SET_FULFILLER_STATUS = True             # mark order as COMPLETED (OpenMRS >= 2.2)
 
