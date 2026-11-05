@@ -132,6 +132,7 @@
                     "conceptNames": [
                         "Radiology Finding"
                     ],
+                    "filterObsWithOrders": false,
                     "displayNameType": "FSN",
                     "showDetailsButton": true,
                     "numberOfVisits": 5
@@ -140,6 +141,7 @@
                     "conceptNames": [
                         "Radiology Finding"
                     ],
+                    "filterObsWithOrders": false,
                     "displayNameType": "FSN",
                     "showDetailsButton": true,
                     "numberOfVisits": 10
