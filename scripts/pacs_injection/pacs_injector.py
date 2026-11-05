@@ -13,7 +13,7 @@ from pynetdicom import AE
 from PIL import Image, ImageDraw, ImageFont
 import requests
 import urllib3
-from openmrs_report import (publish_report_for_order, REPORT_CONCEPT_NAME,
+from openmrs_report import (publish_report_for_order, finding_exists_for_order, REPORT_CONCEPT_NAME,
                             OPENMRS_REST_URL, OPENMRS_AUTH)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -603,6 +603,19 @@ def process_json_trigger(file_path):
     print(f"    Untersuchung: {procedure}")
     print(f"    Geburtsdatum: {dob}")
     print(f"    Station: {ward}")
+
+    # Doppelte Aufträge überspringen: Gibt es für diese Order schon einen Befund in OpenMRS,
+    # wurde sie bereits vollständig verarbeitet (Befund wird erst nach erfolgreichem PACS-Upload
+    # geschrieben). Schützt vor doppelten Studien im PACS, wenn pacs-integration oder Mirth
+    # dieselbe Order erneut schicken.
+    if ctx.get("patient_uuid") and ctx.get("order_uuid"):
+        try:
+            if finding_exists_for_order(ctx["patient_uuid"], ctx["order_uuid"]):
+                print(f"[i] Order {accession_number} wurde bereits verarbeitet (Befund vorhanden) -> übersprungen.")
+                remove_trigger(file_path)
+                return
+        except Exception as dup_err:
+            print(f"[!] Prüfung auf doppelte Order fehlgeschlagen ({dup_err}) -> verarbeite trotzdem.")
 
     # 1. Vorgefertigter Fall (Station + Geburtsdatum + Untersuchung) aus cases.json
     case, study = find_case_study(load_cases(CASES_FILE), ward, dob, procedure)

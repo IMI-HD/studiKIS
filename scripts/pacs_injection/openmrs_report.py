@@ -126,6 +126,13 @@ def report_exists(patient_uuid, order_number, concept_name=REPORT_CONCEPT_NAME):
     return any(o.get("comment") == order_comment(order_number) for o in obs)
 
 
+def finding_exists_for_order(patient_uuid, order_uuid):
+    """True if any finding concept (radiology, ECG, ...) already exists for this order.
+    Used by pacs_injector.py to skip duplicate triggers completely (no second PACS upload)."""
+    order_number = get_order_number(order_uuid)
+    return any(report_exists(patient_uuid, order_number, c) for c in REPORT_CONCEPTS)
+
+
 # --------------------------------------------------------------------------
 # Write finding
 # --------------------------------------------------------------------------
