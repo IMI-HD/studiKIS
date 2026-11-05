@@ -26,7 +26,7 @@ def post_resource(endpoint, payload):
         print(f"Fehler bei POST {endpoint}: {response.status_code} - {response.text}")
         return None
 
-def setup_radiology_mapping(concept_display_name):
+def setup_radiology_mapping(concept_display_name, concept_uuid=None):
     print(f"\n--- Verarbeite: {concept_display_name} ---")
 
     # 1. Sicherstellen, dass die Concept Source existiert
@@ -38,63 +38,50 @@ def setup_radiology_mapping(concept_display_name):
     else:
         source_uuid = source['results'][0]['uuid']
 
-    # 2. Konzept abrufen (mit allen Mappings)
-    concept_search = get_resource("concept", {"q": concept_display_name, "v": "full"})
-    if not concept_search or not concept_search['results']:
+    # 2. Konzept mit seinen Mappings abrufen
+    # Direkt über die UUID: Die Namenssuche (q=...) liefert bei ähnlichen Namen
+    # (z. B. "Echocardiogram" / "Transthoracic echocardiogram") sonst evtl. das falsche Konzept.
+    rep = "custom:(uuid,display,mappings:(display))"
+    if concept_uuid:
+        concept_data = get_resource(f"concept/{concept_uuid}", {"v": rep})
+    else:
+        search = get_resource("concept", {"q": concept_display_name, "v": rep}) or {}
+        concept_data = next((c for c in search.get("results", [])
+                             if c.get("display", "").lower() == concept_display_name.lower()), None)
+    if not concept_data:
         print(f"FEHLER: Konzept '{concept_display_name}' nicht gefunden.")
         return
 
-    concept_data = concept_search['results'][0]
     concept_uuid = concept_data['uuid']
-    existing_mappings = concept_data.get('mappings', [])
-    
-    # Prüfen, ob bereits ein Mapping für diese Source existiert
-    already_mapped = False
-    updated_mappings = []
-    
-    for m in existing_mappings:
-        ref_term = m.get('conceptReferenceTerm')
-        if not ref_term: continue
-        
-        # Mapping für Payload sichern
-        updated_mappings.append({
-            "conceptReferenceTerm": ref_term['uuid'],
-            "conceptMapType": m['conceptMapType']['uuid']
-        })
-        
-        # Check ob unsere Source schon gemappt ist
-        source_ref = ref_term.get('conceptSource')
-        # In 'full' Ansicht ist conceptSource oft ein Objekt
-        source_name_current = source_ref.get('display') if isinstance(source_ref, dict) else ""
-        
-        if SOURCE_NAME in source_name_current:
-            already_mapped = True
 
-    if already_mapped:
+    # Prüfen, ob bereits ein Mapping für diese Source existiert.
+    # Die Anzeige eines Mappings lautet "<Source>: <Code>", z. B. "PACS Procedure Code: 2413aaa5-...".
+    # (Früher wurde conceptSource am Reference Term geprüft - das ist in der REST-Antwort nicht enthalten,
+    #  daher wurde ein vorhandenes Mapping nie erkannt.)
+    if any((m.get('display') or '').startswith(f"{SOURCE_NAME}:") for m in concept_data.get('mappings', [])):
         print(f"Info: {concept_display_name} hat bereits ein PACS-Mapping. Überspringe...")
         return
 
     # 3. Neuen Reference Term erstellen (Code = UUID, Name = Konzeptname)
     new_pacs_code = str(uuid.uuid4()) # Generiert eine zufällige UUID
     print(f"Erstelle neuen Term: Name='{concept_display_name}', Code='{new_pacs_code}'")
-    
+
     term_payload = {
         "code": new_pacs_code,
         "name": concept_display_name, # Hier wird der Name des Konzeptes gesetzt
         "conceptSource": source_uuid
     }
-    
+
     new_term = post_resource("conceptreferenceterm", term_payload)
     if not new_term:
         return
 
-    # 4. Mapping zum Konzept hinzufügen
-    updated_mappings.append({
+    # 4. Nur das neue Mapping über die Sub-Resource hinzufügen
+    #    (früher wurden alle Mappings neu gesendet -> Fehler "term.alreadyMapped")
+    if post_resource(f"concept/{concept_uuid}/mapping", {
         "conceptReferenceTerm": new_term['uuid'],
         "conceptMapType": SAME_AS_MAP_TYPE
-    })
-
-    if post_resource(f"concept/{concept_uuid}", {"mappings": updated_mappings}):
+    }):
         print(f"ERFOLG: Mapping für {concept_display_name} mit UUID-Code erstellt.")
 
 def get_radiology_orders():
@@ -123,7 +110,20 @@ def get_radiology_orders():
         print(f"Das Konzept '{CONCEPT_NAME}' hat keine Mitglieder (setMembers).")
         return
 
-    return [member.get('display') for member in members]
+    # Rekursiv: Unter-Sets (z. B. nach Fachgebiet gruppiert) bis zu den einzelnen Untersuchungen auflösen
+    leaves = []
+    def collect(member, depth=0):
+        if depth > 5:
+            return
+        detail = get_resource(f"concept/{member['uuid']}", {"v": "custom:(uuid,display,set,setMembers:(uuid,display))"})
+        if detail and detail.get('set'):
+            for child in detail.get('setMembers', []):
+                collect(child, depth + 1)
+        else:
+            leaves.append((member.get('display'), member['uuid']))
+    for member in members:
+        collect(member)
+    return leaves
 
 
 if __name__ == "__main__":
@@ -131,6 +131,6 @@ if __name__ == "__main__":
     # Da wir die Codes nun generieren, brauchen wir nur noch die Namen der Konzepte
     concepts_to_process = get_radiology_orders()
 
-    for name in concepts_to_process:
+    for name, concept_uuid in concepts_to_process:
         # print(name)
-        setup_radiology_mapping(name)
+        setup_radiology_mapping(name, concept_uuid)
