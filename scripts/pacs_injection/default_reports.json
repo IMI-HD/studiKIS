@@ -1,0 +1,22 @@
+[
+    {
+        "name": "ECG - normal",
+        "procedure": ["electrocardiogra", "ekg", "ecg"],
+        "concept": "ECG Finding",
+        "report_text": "Normofrequenter Sinusrhythmus, regelmäßig. Indifferenztyp. PQ-, QRS- und QTc-Zeit in der Norm. Regelrechte R-Progression. Keine Erregungsrückbildungsstörungen.\n\nBeurteilung: Unauffälliges EKG."
+    },
+    {
+        "name": "Echocardiogram - normal",
+        "procedure": ["echocardiogra", "echokardiogra"],
+        "report_text": "Normal großer linker Ventrikel mit normaler systolischer Pumpfunktion, keine regionalen Wandbewegungsstörungen. Keine Hinweise auf diastolische Funktionsstörung. LA, RA und RV normal groß, gute RV-Funktion. Herzklappen morphologisch und dopplersonographisch regelrecht. Kein Perikarderguss. Vena cava inferior nicht gestaut.\n\nBeurteilung: Unauffälliger echokardiographischer Befund."
+    },
+    {
+        "name": "Angiogram - normal",
+        "procedure": ["angiogra", "koronar"],
+        "report_text": "Glattwandige Koronararterien ohne Nachweis relevanter Stenosen. Rechtsversorgungstyp. Normale linksventrikuläre Pumpfunktion.\n\nBeurteilung: Ausschluss einer koronaren Herzerkrankung."
+    },
+    {
+        "name": "Default - normal",
+        "report_text": "Untersuchung: {procedure}\n\nBefund: Regelrechte Darstellung der abgebildeten Strukturen. Kein Nachweis einer akuten oder pathologischen Veränderung.\n\nBeurteilung: Unauffälliger Befund."
+    }
+]

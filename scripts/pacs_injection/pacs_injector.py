@@ -13,6 +13,8 @@ from pynetdicom import AE
 from PIL import Image, ImageDraw, ImageFont
 import requests
 import urllib3
+from openmrs_report import (publish_report_for_order, REPORT_CONCEPT_NAME,
+                            OPENMRS_REST_URL, OPENMRS_AUTH)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -22,7 +24,12 @@ TRIGGER_DIR = "/var/lib/docker/volumes/bahmni-standard_mirth_pacs_data/_data/tri
 TEMPLATE_FILE = "/home/kislab/dicom_images/gesicht_roentgen.dcm"
 IMAGE_DIR = "/home/kislab/dicom_images"
 # Fall-Konfiguration (Station + Geburtsdatum -> vorgefertigte Bildgebung). Bildpfade darin relativ zu IMAGE_DIR.
-CASES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cases.json")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CASES_FILE = os.path.join(SCRIPT_DIR, "cases.json")
+# Befundtexte der Fälle ("report" in cases.json) liegen versioniert im Repo
+REPORTS_DIR = os.path.join(SCRIPT_DIR, "reports")
+# Unauffällige Standardbefunde für alle Orders ohne vorgefertigten Fall
+DEFAULT_REPORTS_FILE = os.path.join(SCRIPT_DIR, "default_reports.json")
 VIDEO_MAX_WIDTH = 1024  # MP4 werden für unkomprimiertes Multi-Frame-DICOM auf diese Breite verkleinert
 
 # 2. PACS VERBINDUNGSDATEN (dcm4chee DICOM-Port, standardmäßig 11112)
@@ -30,34 +37,15 @@ PACS_IP = "127.0.0.1"   # Da Port 11112 auf den Host weitergeleitet ist (0.0.0.0
 PACS_PORT = 11112       # Der DICOM-Port aus docker ps
 PACS_AET = "DCM4CHEE"   # Der Standard AE-Title von dcm4chee in Bahmni
 
-# OpenMRS REST (Geburtsdatum + Station stehen NICHT in der HL7-Nachricht und werden hier nachgeladen)
-OPENMRS_REST_URL = "https://localhost/openmrs/ws/rest/v1"
-OPENMRS_AUTH = ("superman", "Admin123")
+# OpenMRS REST: URL und Zugangsdaten kommen aus openmrs_report.py
+# (Geburtsdatum + Station stehen NICHT in der HL7-Nachricht und werden nachgeladen)
 
 # 3. BOILERPLATE BEFUND-TEMPLATE (zum Testen; kann später durch vorgefertigte Reports ersetzt werden)
-REPORT_BOILERPLATE_TEMPLATE = """============================================================
-BEFUNDBERICHT RADIOLOGIE (MUSTER / BOILERPLATE)
-============================================================
-Patient:        {patient_name}
-Patienten-ID:   {patient_id}
-Auftragsnummer: {accession_number}
-Untersuchung:   {procedure}
-Befunddatum:    {date}
-------------------------------------------------------------
-KLINISCHE ANGABEN & FRAGESTELLUNG:
-Ausschluss ossäre Traumafolgen / Pathologie nach Anforderung.
+REPORT_BOILERPLATE_TEMPLATE = """Untersuchung: {procedure}
 
-BEFUND:
-- Regelrechte Darstellung der knöchernen Strukturen im Zielgebiet.
-- Keine Fissur, Frakturlinie oder pathologische Dislokation abgrenzbar.
-- Regelrechte Gelenkstellung, keine Gelenkergussbildung.
-- Weichteile ohne Hinweis auf tumoröse oder entzündliche Raumforderung.
+Befund: Regelrechte Darstellung der abgebildeten Strukturen. Kein Nachweis einer akuten oder pathologischen Veränderung.
 
-BEURTEILUNG:
-Unauffälliger radiologischer Normalbefund der Untersuchung '{procedure}'.
-Kein Anhalt für frische ossäre Läsionen oder akuten Interventionsbedarf.
-============================================================
-"""
+Beurteilung: Unauffälliger Befund."""
 
 
 def render_report_image(report_text, width=1200, height=1500):
@@ -315,35 +303,39 @@ def openmrs_get(path, params=None):
 
 def lookup_patient_context(patient_identifier, accession_number):
     """
-    Holt Geburtsdatum und Station aus OpenMRS.
+    Holt Geburtsdatum, Station sowie Patient- und Order-UUID aus OpenMRS.
     Station = Location des Encounters, in dem die Radiologie-Order angelegt wurde
     (entspricht encounterData.locationName im Lab-Channel von Mirth).
     """
+    ctx = {"dob": "", "ward": "", "patient_uuid": None, "order_uuid": None}
+
     patients = openmrs_get("patient", {
         "identifier": patient_identifier,
         "v": "custom:(uuid,person:(birthdate))"
     }).get("results", [])
     if not patients:
         print(f"[!] Patient '{patient_identifier}' nicht in OpenMRS gefunden.")
-        return "", ""
+        return ctx
 
     patient_uuid = patients[0]["uuid"]
-    dob = ((patients[0].get("person") or {}).get("birthdate") or "")[:10]  # "1951-06-23"
+    ctx["patient_uuid"] = patient_uuid
+    ctx["dob"] = ((patients[0].get("person") or {}).get("birthdate") or "")[:10]  # "1951-06-23"
 
-    # a) Encounter der Order über die Accession-/Order-Nummer finden
+    # a) Order und deren Encounter über die Accession-/Order-Nummer finden
     encounter_uuid = None
     orders = openmrs_get("order", {
         "patient": patient_uuid,
-        "v": "custom:(orderNumber,accessionNumber,encounter:(uuid))"
+        "v": "custom:(uuid,orderNumber,accessionNumber,encounter:(uuid))"
     }).get("results", [])
     for order in orders:
         if accession_number and accession_number in (order.get("orderNumber"), order.get("accessionNumber")):
+            ctx["order_uuid"] = order["uuid"]
             encounter_uuid = (order.get("encounter") or {}).get("uuid")
             break
 
     if encounter_uuid:
         encounter = openmrs_get(f"encounter/{encounter_uuid}", {"v": "custom:(location:(display))"})
-        ward = (encounter.get("location") or {}).get("display") or ""
+        ctx["ward"] = (encounter.get("location") or {}).get("display") or ""
     else:
         # b) Fallback: Location des jüngsten Encounters des Patienten
         print(f"[!] Keine Order zu Accession '{accession_number}' gefunden -> nutze jüngsten Encounter.")
@@ -352,9 +344,9 @@ def lookup_patient_context(patient_identifier, accession_number):
             "v": "custom:(encounterDatetime,location:(display))"
         }).get("results", [])
         latest = max(encounters, key=lambda e: e.get("encounterDatetime") or "", default={})
-        ward = (latest.get("location") or {}).get("display") or ""
+        ctx["ward"] = (latest.get("location") or {}).get("display") or ""
 
-    return dob, ward
+    return ctx
 
 
 def load_cases(cases_file):
@@ -369,6 +361,14 @@ def load_cases(cases_file):
         return json.load(f)
 
 
+def matches_procedure(keywords, procedure):
+    """True, wenn eines der Stichwörter im Untersuchungsnamen vorkommt (Groß-/Kleinschreibung egal)."""
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    procedure_lower = str(procedure or "").strip().lower()
+    return any(k.strip().lower() in procedure_lower for k in keywords if k.strip())
+
+
 def find_case_study(cases, ward, dob, procedure):
     """
     Sucht den Fall, dessen Station (Teilstring) UND Geburtsdatum passen,
@@ -376,7 +376,6 @@ def find_case_study(cases, ward, dob, procedure):
     """
     norm_dob = normalize_dob(dob)
     ward_lower = str(ward or "").strip().lower()
-    procedure_lower = str(procedure or "").strip().lower()
     if not norm_dob or not ward_lower:
         return None, None
 
@@ -385,12 +384,21 @@ def find_case_study(cases, ward, dob, procedure):
         if normalize_dob(case.get('dob')) != norm_dob or not case_ward or case_ward not in ward_lower:
             continue
         for study in case.get('studies', []):
-            keywords = study.get('procedure', [])
-            if isinstance(keywords, str):
-                keywords = [keywords]
-            if any(k.strip().lower() in procedure_lower for k in keywords if k.strip()):
+            if matches_procedure(study.get('procedure', []), procedure):
                 return case, study
     return None, None
+
+
+def find_default_report(procedure):
+    """
+    Unauffälliger Standardbefund aus default_reports.json: erste Regel, deren Stichwort passt.
+    Eine Regel ohne "procedure" passt immer (allgemeiner Normalbefund, gehört ans Ende).
+    """
+    for rule in load_cases(DEFAULT_REPORTS_FILE):
+        keywords = rule.get('procedure')
+        if not keywords or matches_procedure(keywords, procedure):
+            return rule
+    return None
 
 
 def find_legacy_png(patient_name, procedure):
@@ -415,23 +423,41 @@ def find_legacy_png(patient_name, procedure):
     return None
 
 
+def read_report_file(report_file):
+    """Befundvorlage zuerst im Repo (reports/), sonst wie bisher in IMAGE_DIR suchen."""
+    for base in (REPORTS_DIR, IMAGE_DIR):
+        path = os.path.join(base, report_file)
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                return f.read().strip()
+    print(f"[!] Befundvorlage nicht gefunden: {report_file} (gesucht in {REPORTS_DIR} und {IMAGE_DIR})")
+    return None
+
+
 def build_report_text(study, patient_name, patient_id, accession_number, procedure):
     """
-    Nutzt die im Fall hinterlegte Befundvorlage (Textdatei, relativ zu IMAGE_DIR) oder das Boilerplate.
-    Platzhalter wie {patient_name} oder {date} werden in beiden Fällen ersetzt.
+    Liefert (Befundtext, OpenMRS-Konzept).
+    Reihenfolge: Fall-Befund aus cases.json ("report_text" oder Datei "report")
+              -> unauffälliger Standardbefund aus default_reports.json
+              -> REPORT_BOILERPLATE_TEMPLATE.
+    Platzhalter wie {patient_name}, {procedure} oder {date} werden ersetzt.
     """
-    template = REPORT_BOILERPLATE_TEMPLATE
-    report_file = (study or {}).get('report')
-    if report_file:
-        report_path = os.path.join(IMAGE_DIR, report_file)
-        if os.path.exists(report_path):
-            with open(report_path, 'r', encoding='utf-8') as f:
-                template = f.read()
-        else:
-            print(f"[!] Befundvorlage nicht gefunden: {report_path} -> nutze Boilerplate")
+    template = None
+    source = study or {}
+    if study:
+        template = study.get('report_text') or (read_report_file(study['report']) if study.get('report') else None)
+    if template is None:
+        default = find_default_report(procedure)
+        if default:
+            source = default
+            template = default.get('report_text') or (read_report_file(default['report']) if default.get('report') else None)
+            print(f"[*] Standardbefund '{default.get('name', '?')}' verwendet.")
+    if template is None:
+        template = REPORT_BOILERPLATE_TEMPLATE
+    concept = source.get('concept') or REPORT_CONCEPT_NAME
 
     try:
-        return template.format(
+        text = template.format(
             patient_name=patient_name if patient_name else "Unbekannt",
             patient_id=patient_id if patient_id else "-",
             accession_number=accession_number if accession_number else "-",
@@ -440,7 +466,8 @@ def build_report_text(study, patient_name, patient_id, accession_number, procedu
         )
     except (KeyError, IndexError, ValueError):
         # Vorlage enthält unbekannte/ungültige geschweifte Klammern -> unverändert verwenden
-        return template
+        text = template
+    return text, concept
 
 
 def create_png_dataset(template_file, png_path):
@@ -490,6 +517,63 @@ def create_image_dataset(image_path):
     return create_png_dataset(TEMPLATE_FILE, image_path)
 
 
+def remove_trigger(file_path):
+    """Trigger-Datei löschen, damit sie nicht doppelt verarbeitet wird."""
+    if os.path.exists(file_path):
+        os.remove(file_path)
+    print("[*] Trigger-Datei bereinigt. Warte auf nächsten Auftrag...")
+
+
+def publish_finding(ctx, report_text, concept, ward):
+    """Befund als Text-Observation in OpenMRS ablegen (erscheint im Clinical Dashboard)."""
+    if not (ctx.get("patient_uuid") and ctx.get("order_uuid")):
+        print("[!] Patient/Order nicht in OpenMRS gefunden -> Befund wird nicht in OpenMRS gespeichert.")
+        return
+    try:
+        publish_report_for_order(ctx["patient_uuid"], ctx["order_uuid"], report_text,
+                                 concept_name=concept, location_name=ward)
+    except Exception as rep_err:
+        print(f"[X] Befund konnte nicht in OpenMRS gespeichert werden: {rep_err}")
+
+
+def send_to_pacs(ds, report_ds):
+    """Bild und Befund-Bild per C-STORE an dcm4chee senden. Gibt True zurück, wenn beides gespeichert wurde."""
+    ae = AE(ae_title=PACS_AET)
+    ae.add_requested_context(ds.file_meta.MediaStorageSOPClassUID)
+    if hasattr(report_ds, 'file_meta') and report_ds.file_meta.MediaStorageSOPClassUID != ds.file_meta.MediaStorageSOPClassUID:
+        ae.add_requested_context(report_ds.file_meta.MediaStorageSOPClassUID)
+
+    print(f"[*] Sende Bild und Befundbericht an dcm4chee ({PACS_IP}:{PACS_PORT})...")
+    assoc = ae.associate(PACS_IP, PACS_PORT, ae_title=PACS_AET)
+
+    if not assoc.is_established:
+        print(f"[X] FEHLER: Verbindung zu dcm4chee ({PACS_IP}:{PACS_PORT}) fehlgeschlagen.")
+        if hasattr(assoc, 'is_rejected') and assoc.is_rejected:
+            print(f"    Grund: DICOM Association wurde vom PACS abgewiesen (Result: {getattr(assoc, 'result', 'Rejected')}).")
+        elif hasattr(assoc, 'is_aborted') and assoc.is_aborted:
+            print("    Grund: DICOM Association wurde abgebrochen (Aborted).")
+        else:
+            print(f"    Grund: Kein TCP-Verbindungsaufbau zu {PACS_IP}:{PACS_PORT} möglich.")
+        return False
+
+    status_img = assoc.send_c_store(ds)
+    img_success = hasattr(status_img, 'Status') and status_img.Status == 0x0000
+    print(f"[{'V' if img_success else 'X'}] Bild übertragen (Status: {hex(status_img.Status) if hasattr(status_img, 'Status') else status_img})")
+
+    status_rep = assoc.send_c_store(report_ds)
+    rep_success = hasattr(status_rep, 'Status') and status_rep.Status == 0x0000
+    print(f"[{'V' if rep_success else 'X'}] Befundbericht übertragen (Status: {hex(status_rep.Status) if hasattr(status_rep, 'Status') else status_rep})")
+
+    assoc.release()
+    # Hinweis: Früher stand hier (img_success or status_img) - das war immer wahr,
+    # weil ein pydicom-Dataset als Objekt "truthy" ist. Jetzt zählt nur Status 0x0000.
+    if img_success and rep_success:
+        print("[V] ERFOLG: Bild und Befundbericht im PACS gespeichert!")
+        return True
+    print("[X] Übertragung ins PACS unvollständig.")
+    return False
+
+
 def process_json_trigger(file_path):
     # JSON-Daten von Mirth einlesen
     with open(file_path, 'r') as f:
@@ -503,14 +587,15 @@ def process_json_trigger(file_path):
     dob = data.get('dob', '')
     ward = data.get('ward', '')
 
-    # Geburtsdatum/Station sind nicht in der HL7-Nachricht -> aus OpenMRS nachladen
-    if not (dob and ward):
-        try:
-            looked_up_dob, looked_up_ward = lookup_patient_context(patient_id, accession_number)
-            dob = dob or looked_up_dob
-            ward = ward or looked_up_ward
-        except Exception as lookup_err:
-            print(f"[!] OpenMRS-Abfrage fehlgeschlagen ({lookup_err}) -> nur bisherige PNG-Suche möglich.")
+    # Geburtsdatum/Station + Patient-/Order-UUID aus OpenMRS nachladen
+    # (UUIDs werden für den Befund in OpenMRS immer benötigt)
+    ctx = {}
+    try:
+        ctx = lookup_patient_context(patient_id, accession_number)
+        dob = dob or ctx["dob"]
+        ward = ward or ctx["ward"]
+    except Exception as lookup_err:
+        print(f"[!] OpenMRS-Abfrage fehlgeschlagen ({lookup_err}) -> nur bisherige PNG-Suche, kein Befund in OpenMRS.")
 
     print(f"    Patienten-ID: {patient_id}")
     print(f"    Patienten-Name: {patient_name}")
@@ -519,37 +604,36 @@ def process_json_trigger(file_path):
     print(f"    Geburtsdatum: {dob}")
     print(f"    Station: {ward}")
 
-    if not os.path.exists(IMAGE_DIR):
-        print(f"[X] FEHLER: Bildverzeichnis existiert nicht: {IMAGE_DIR}")
-        os.remove(file_path)
-        print("[*] Trigger-Datei bereinigt. Warte auf nächsten Auftrag...")
-        return
-
     # 1. Vorgefertigter Fall (Station + Geburtsdatum + Untersuchung) aus cases.json
     case, study = find_case_study(load_cases(CASES_FILE), ward, dob, procedure)
-    if study:
+    if case:
+        print(f"[+] Fall '{case.get('name', '?')}' erkannt.")
+
+    # 2. Befundtext + Konzept (Fall-Befund oder unauffälliger Standardbefund)
+    report_text, concept = build_report_text(study, patient_name, patient_id, accession_number, procedure)
+    print(f"[*] Befund generiert für '{procedure}' ({patient_name}) -> Konzept '{concept}'")
+
+    # 3. Bild suchen: Datei aus dem Fall, sonst bisherige PNG-Suche über den Dateinamen
+    image_path = None
+    if not os.path.exists(IMAGE_DIR):
+        print(f"[X] FEHLER: Bildverzeichnis existiert nicht: {IMAGE_DIR}")
+    elif study and study.get('file'):
         image_path = os.path.join(IMAGE_DIR, study['file'])
-        print(f"[+] Fall '{case.get('name', '?')}' erkannt -> {image_path}")
     else:
-        # 2. Fallback: bisherige PNG-Suche über den Dateinamen
         image_path = find_legacy_png(patient_name, procedure)
 
     if not image_path or not os.path.exists(image_path):
-        print(f"[i] Kein Bild für Patient '{patient_name}' / Untersuchung '{procedure}' hinterlegt. Auftrag wird ignoriert.")
-        # Trigger-Datei löschen, damit sie nicht doppelt verarbeitet wird
-        os.remove(file_path)
-        print("[*] Trigger-Datei bereinigt. Warte auf nächsten Auftrag...")
+        # Kein Bild (z. B. EKG) -> nur Befund in OpenMRS, nichts ins PACS
+        print(f"[i] Kein Bild für Patient '{patient_name}' / Untersuchung '{procedure}' hinterlegt -> nur Befund in OpenMRS.")
+        publish_finding(ctx, report_text, concept, ward)
+        remove_trigger(file_path)
         return
 
     print(f"[+] Verwende Bilddatei: {image_path}")
 
-    report_text = build_report_text(study, patient_name, patient_id, accession_number, procedure)
-    print(f"[*] Befund generiert für '{procedure}' ({patient_name})")
-
     if not os.path.exists(TEMPLATE_FILE):
         print(f"[X] FEHLER: Die Bildvorlage fehlt unter: {TEMPLATE_FILE}")
-        os.remove(file_path)
-        print("[*] Trigger-Datei bereinigt. Warte auf nächsten Auftrag...")
+        remove_trigger(file_path)
         return
 
     print(f"[*] Erzeuge Bild-DICOM und manipuliere DICOM-Header...")
@@ -557,8 +641,7 @@ def process_json_trigger(file_path):
         ds = create_image_dataset(image_path)
     except Exception as img_err:
         print(f"[X] FEHLER bei der Bild-Konvertierung: {img_err}")
-        os.remove(file_path)
-        print("[*] Trigger-Datei bereinigt. Warte auf nächsten Auftrag...")
+        remove_trigger(file_path)
         return
 
     # GEMEINSAME StudyInstanceUID generieren:
@@ -581,7 +664,7 @@ def process_json_trigger(file_path):
     ds.StudyDescription = f"Radiology Order - {procedure}" if procedure else "Radiology Order"
     ds.SeriesDescription = (study or {}).get('description') or (f"Roentgen - {procedure}" if procedure else "Roentgenbild")
     ds.SpecificCharacterSet = "ISO_IR 192"
-    # Befundtext auch direkt am Röntgenbild als ImageComment & StudyComment hinterlegen
+    # Befundtext auch direkt am Bild als ImageComment & StudyComment hinterlegen
     ds.ImageComments = report_text
     ds.StudyComments = report_text
 
@@ -596,41 +679,13 @@ def process_json_trigger(file_path):
         procedure=procedure
     )
 
-    # Verbindung zu dcm4chee aufbauen (DICOM C-STORE)
-    ae = AE(ae_title=PACS_AET)
-    ae.add_requested_context(ds.file_meta.MediaStorageSOPClassUID)
-    if hasattr(report_ds, 'file_meta') and report_ds.file_meta.MediaStorageSOPClassUID != ds.file_meta.MediaStorageSOPClassUID:
-        ae.add_requested_context(report_ds.file_meta.MediaStorageSOPClassUID)
-
-    print(f"[*] Sende Röntgenbild und Befundbericht an dcm4chee ({PACS_IP}:{PACS_PORT})...")
-    assoc = ae.associate(PACS_IP, PACS_PORT, ae_title=PACS_AET)
-
-    if assoc.is_established:
-        # 1. Röntgenbild übertragen (mit ImageComments)
-        status_img = assoc.send_c_store(ds)
-        img_success = hasattr(status_img, 'Status') and status_img.Status == 0x0000
-        print(f"[V] Röntgenbild übertragen (Status: {hex(status_img.Status) if hasattr(status_img, 'Status') else status_img})")
-
-        # 2. Befundbericht-Bild übertragen (mit ImageComments)
-        status_rep = assoc.send_c_store(report_ds)
-        rep_success = hasattr(status_rep, 'Status') and status_rep.Status == 0x0000
-        print(f"[V] Befundbericht übertragen (Status: {hex(status_rep.Status) if hasattr(status_rep, 'Status') else status_rep})")
-
-        assoc.release()
-        if (img_success or status_img) and (rep_success or status_rep):
-            print(f"[V] ERFOLG: Röntgenbild und Befundbericht erfolgreich im PACS gespeichert!")
+    # 4. Ins PACS senden; Befund in OpenMRS nur, wenn die Bilder wirklich gespeichert wurden
+    if send_to_pacs(ds, report_ds):
+        publish_finding(ctx, report_text, concept, ward)
     else:
-        print(f"[X] FEHLER: Verbindung zu dcm4chee ({PACS_IP}:{PACS_PORT}) fehlgeschlagen.")
-        if hasattr(assoc, 'is_rejected') and assoc.is_rejected:
-            print(f"    Grund: DICOM Association wurde vom PACS abgewiesen (Result: {getattr(assoc, 'result', 'Rejected')}).")
-        elif hasattr(assoc, 'is_aborted') and assoc.is_aborted:
-            print("    Grund: DICOM Association wurde abgebrochen (Aborted).")
-        else:
-            print(f"    Grund: Kein TCP-Verbindungsaufbau zu {PACS_IP}:{PACS_PORT} möglich.")
+        print("[X] Befund wird nicht an OpenMRS gesendet, da die Bilder fehlen.")
 
-    # Trigger-Datei löschen, damit sie nicht doppelt verarbeitet wird
-    os.remove(file_path)
-    print("[*] Trigger-Datei bereinigt. Warte auf nächsten Auftrag...")
+    remove_trigger(file_path)
 
 def main():
     # Endlosschleife zur Ordnerüberwachung

@@ -39,11 +39,13 @@ OPENMRS_REST_URL = "https://localhost/openmrs/ws/rest/v1"
 OPENMRS_AUTH = ("superman", "Admin123")
 VERIFY_SSL = False                      # Bahmni Docker uses a self-signed certificate
 
-REPORT_CONCEPT_NAME = "Radiology Finding"
+REPORT_CONCEPT_NAME = "Radiology Finding"   # default concept (dashboard section "radiologyFinding")
+ECG_CONCEPT_NAME = "ECG Finding"            # ECGs are ordered as radiology orders but shown separately
+REPORT_CONCEPTS = [REPORT_CONCEPT_NAME, ECG_CONCEPT_NAME]   # created by "setup", verified by "check"
 # Must NOT be "RADIOLOGY": the dashboard section "radiology" (documents control) loads all
 # RADIOLOGY encounters and expects every obs to be a document obs group -> UI crash.
 ENCOUNTER_TYPE_NAME = "Radiology Report"
-LOCATION_NAME = "Kardiologie"           # must be an existing location (ward where students log in)
+LOCATION_NAME = "Kardiologie"           # fallback location if the order's ward is unknown
 VISIT_TYPE = "OPD"                      # must be an existing visit type
 SET_FULFILLER_STATUS = True             # mark order as COMPLETED (OpenMRS >= 2.2)
 
@@ -112,9 +114,9 @@ def get_order_number(order_uuid):
     return _get(f"order/{order_uuid}", v="custom:(orderNumber)")["orderNumber"]
 
 
-def report_exists(patient_uuid, order_number):
+def report_exists(patient_uuid, order_number, concept_name=REPORT_CONCEPT_NAME):
     """Prevent duplicate findings if a trigger is processed twice (matched via obs comment)."""
-    concept_uuid = lookup_uuid("concept", REPORT_CONCEPT_NAME)
+    concept_uuid = lookup_uuid("concept", concept_name)
     obs = _get("obs", patient=patient_uuid, concept=concept_uuid,
                v="custom:(uuid,comment)").get("results", [])
     return any(o.get("comment") == order_comment(order_number) for o in obs)
@@ -123,15 +125,26 @@ def report_exists(patient_uuid, order_number):
 # --------------------------------------------------------------------------
 # Write finding
 # --------------------------------------------------------------------------
-def post_report(patient_uuid, order_number, report_text):
+def resolve_location_uuid(location_name):
+    """Use the given location (e.g. the order's ward); fall back to LOCATION_NAME if it is unknown."""
+    if location_name:
+        try:
+            return lookup_uuid("location", location_name)
+        except LookupError:
+            log(f"location '{location_name}' not found - using '{LOCATION_NAME}'")
+    return lookup_uuid("location", LOCATION_NAME)
+
+
+def post_report(patient_uuid, order_number, report_text,
+                concept_name=REPORT_CONCEPT_NAME, location_name=None):
     payload = {
         "patientUuid": patient_uuid,
         "visitType": VISIT_TYPE,
         "encounterTypeUuid": lookup_uuid("encountertype", ENCOUNTER_TYPE_NAME),
-        "locationUuid": lookup_uuid("location", LOCATION_NAME),
+        "locationUuid": resolve_location_uuid(location_name),
         "observations": [{
-            "concept": {"uuid": lookup_uuid("concept", REPORT_CONCEPT_NAME),
-                        "name": REPORT_CONCEPT_NAME},
+            "concept": {"uuid": lookup_uuid("concept", concept_name),
+                        "name": concept_name},
             "value": report_text,
             "comment": order_comment(order_number),
         }],
@@ -150,20 +163,23 @@ def mark_order_completed(order_uuid):
         log(f"note: fulfiller status not set ({r.status_code}) - finding was saved anyway")
 
 
-def publish_report_for_order(patient_uuid, order_uuid, report_text):
+def publish_report_for_order(patient_uuid, order_uuid, report_text,
+                             concept_name=REPORT_CONCEPT_NAME, location_name=None):
     """
     Main entry point for pacs_injector.py (patient and order UUID already known).
+    concept_name: REPORT_CONCEPT_NAME (default) or e.g. ECG_CONCEPT_NAME.
+    location_name: location of the finding (e.g. the order's ward); falls back to LOCATION_NAME.
     Returns the encounter UUID, or None if a finding for this order already exists.
     """
     order_number = get_order_number(order_uuid)
-    if report_exists(patient_uuid, order_number):
+    if report_exists(patient_uuid, order_number, concept_name):
         log(f"finding for order {order_number} already exists - skipped")
         return None
-    result = post_report(patient_uuid, order_number, report_text)
+    result = post_report(patient_uuid, order_number, report_text, concept_name, location_name)
     if SET_FULFILLER_STATUS:
         mark_order_completed(order_uuid)
     enc = result.get("encounterUuid")
-    log(f"finding saved in OpenMRS (encounter {enc})")
+    log(f"{concept_name} for order {order_number} saved in OpenMRS (encounter {enc})")
     return enc
 
 
@@ -183,23 +199,23 @@ def publish_report(patient, order_number, report_text=None):
 # --------------------------------------------------------------------------
 # Setup / check
 # --------------------------------------------------------------------------
-def setup_concept():
-    """Create the text concept if it does not exist yet."""
+def setup_concept(concept_name):
+    """Create a text concept if it does not exist yet."""
     try:
-        uuid = lookup_uuid("concept", REPORT_CONCEPT_NAME)
-        print(f"Concept already exists: {uuid}")
+        uuid = lookup_uuid("concept", concept_name)
+        print(f"Concept already exists: {concept_name} {uuid}")
         return uuid
     except LookupError:
         pass
     payload = {
-        "names": [{"name": REPORT_CONCEPT_NAME, "locale": "en",
+        "names": [{"name": concept_name, "locale": "en",
                    "localePreferred": True, "conceptNameType": "FULLY_SPECIFIED"}],
         "datatype": lookup_uuid("conceptdatatype", "Text"),
         "conceptClass": lookup_uuid("conceptclass", "Finding"),
     }
     r = session.post(f"{OPENMRS_REST_URL}/concept", json=payload, timeout=15)
     r.raise_for_status()
-    print(f"Concept created: {r.json()['uuid']}")
+    print(f"Concept created: {concept_name} {r.json()['uuid']}")
     return r.json()["uuid"]
 
 
@@ -231,7 +247,7 @@ def void_encounter(encounter_uuid):
 
 def check_config():
     ok = True
-    for resource, name in [("concept", REPORT_CONCEPT_NAME),
+    for resource, name in [*(("concept", c) for c in REPORT_CONCEPTS),
                            ("encountertype", ENCOUNTER_TYPE_NAME),
                            ("location", LOCATION_NAME),
                            ("visittype", VISIT_TYPE)]:
@@ -240,15 +256,16 @@ def check_config():
         except Exception as e:
             ok = False
             print(f"MISSING {resource:14} {name:20} ({e})")
-    try:
-        c = _get(f"concept/{lookup_uuid('concept', REPORT_CONCEPT_NAME)}",
-                 v="custom:(datatype:(display))")
-        dtype = (c.get("datatype") or {}).get("display")
-        if dtype != "Text":
-            ok = False
-            print(f"WARNING concept datatype is '{dtype}', expected 'Text'")
-    except Exception:
-        pass
+    for concept_name in REPORT_CONCEPTS:
+        try:
+            c = _get(f"concept/{lookup_uuid('concept', concept_name)}",
+                     v="custom:(datatype:(display))")
+            dtype = (c.get("datatype") or {}).get("display")
+            if dtype != "Text":
+                ok = False
+                print(f"WARNING concept '{concept_name}' datatype is '{dtype}', expected 'Text'")
+        except LookupError:
+            pass
     return ok
 
 
@@ -257,7 +274,8 @@ if __name__ == "__main__":
     if cmd == "check":
         sys.exit(0 if check_config() else 1)
     elif cmd == "setup":
-        setup_concept()
+        for concept_name in REPORT_CONCEPTS:
+            setup_concept(concept_name)
         setup_encounter_type()
         sys.exit(0 if check_config() else 1)
     elif cmd == "test" and len(sys.argv) >= 4:
