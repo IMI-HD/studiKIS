@@ -115,7 +115,19 @@ def order_comment(order_number):
 
 
 def get_order_number(order_uuid):
-    return _get(f"order/{order_uuid}", v="custom:(orderNumber)")["orderNumber"]
+    return get_order(order_uuid)[0]
+
+
+def get_order(order_uuid):
+    """Return order number and examination name of an order."""
+    o = _get(f"order/{order_uuid}", v="custom:(orderNumber,concept:(display))")
+    return o["orderNumber"], (o.get("concept") or {}).get("display") or ""
+
+
+def report_heading(exam_name, order_number):
+    """First line of every finding: the label in the dashboard is always the concept name
+    ("Radiology Finding"), so the examination is shown at the top of the text instead."""
+    return f"{exam_name} ({order_number})" if exam_name else order_number
 
 
 def report_exists(patient_uuid, order_number, concept_name=REPORT_CONCEPT_NAME):
@@ -182,15 +194,16 @@ def publish_report_for_order(patient_uuid, order_uuid, report_text,
     location_name: location of the finding (e.g. the order's ward); falls back to LOCATION_NAME.
     Returns the encounter UUID, or None if a finding for this order already exists.
     """
-    order_number = get_order_number(order_uuid)
+    order_number, exam_name = get_order(order_uuid)
     if report_exists(patient_uuid, order_number, concept_name):
         log(f"finding for order {order_number} already exists - skipped")
         return None
-    result = post_report(patient_uuid, order_number, report_text, concept_name, location_name)
+    text = f"{report_heading(exam_name, order_number)}\n\n{report_text}"
+    result = post_report(patient_uuid, order_number, text, concept_name, location_name)
     if SET_FULFILLER_STATUS:
         mark_order_completed(order_uuid)
     enc = result.get("encounterUuid")
-    log(f"{concept_name} for order {order_number} saved in OpenMRS (encounter {enc})")
+    log(f"{concept_name} '{exam_name}' for order {order_number} saved in OpenMRS (encounter {enc})")
     return enc
 
 
