@@ -4,8 +4,9 @@ from datetime import datetime
 
 import cv2
 from pydicom.dataset import Dataset, FileMetaDataset
+from pydicom.encaps import encapsulate
 from pydicom.tag import Tag
-from pydicom.uid import generate_uid, ExplicitVRLittleEndian
+from pydicom.uid import generate_uid
 from pynetdicom import AE
 
 
@@ -15,12 +16,15 @@ DEFAULT_VIDEO = "/home/kislab/dicom_images/Ventrikulografie mit mittelgradig red
 # X-Ray Angiographic Image Storage (Multi-Frame / Cine-fähig, passend für Ventrikulografie)
 XA_IMAGE_STORAGE = "1.2.840.10008.5.1.4.1.1.12.1"
 
+# JPEG Baseline: jeder Frame wird einzeln komprimiert, das Objekt bleibt ein normales Multi-Frame-Bild
+JPEG_BASELINE_TRANSFER_SYNTAX = "1.2.840.10008.1.2.4.50"
+DEFAULT_JPEG_QUALITY = 60
+
 
 def read_video_frames(video_path, max_width=None, max_frames=None):
     """
     Liest alle Frames des Videos ein und wandelt sie in 8-Bit Graustufen um.
-    Optional wird auf max_width herunterskaliert, da unkomprimierte Multi-Frame-DICOMs
-    sonst sehr groß werden (1080p x 300 Frames ≈ 600 MB).
+    Optional wird auf max_width herunterskaliert, um die DICOM-Datei weiter zu verkleinern.
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -50,9 +54,21 @@ def read_video_frames(video_path, max_width=None, max_frames=None):
     return frames, fps
 
 
-def create_video_dataset(frames, fps, patient_id, patient_name, accession_number, study_instance_uid, description):
+def encode_frames_jpeg(frames, quality=DEFAULT_JPEG_QUALITY):
+    """Komprimiert jeden Graustufen-Frame einzeln als JPEG Baseline und gibt die JPEG-Bytes zurück."""
+    encoded = []
+    for index, frame in enumerate(frames, start=1):
+        ok, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        if not ok:
+            raise ValueError(f"Frame {index} konnte nicht als JPEG kodiert werden")
+        encoded.append(jpeg.tobytes())
+    return encoded
+
+
+def create_video_dataset(frames, fps, patient_id, patient_name, accession_number, study_instance_uid, description,
+                         jpeg_quality=DEFAULT_JPEG_QUALITY):
     """
-    Erstellt ein unkomprimiertes Multi-Frame XA-DICOM (Cine-Loop) aus den Video-Frames.
+    Erstellt ein JPEG-komprimiertes Multi-Frame XA-DICOM (Cine-Loop) aus den Video-Frames.
     FrameTime + FrameIncrementPointer sorgen dafür, dass Viewer (z.B. Oviyam2) das Video abspielen.
     """
     sop_uid = generate_uid()
@@ -60,7 +76,7 @@ def create_video_dataset(frames, fps, patient_id, patient_name, accession_number
     file_meta = FileMetaDataset()
     file_meta.MediaStorageSOPClassUID = XA_IMAGE_STORAGE
     file_meta.MediaStorageSOPInstanceUID = sop_uid
-    file_meta.TransferSyntaxUID = ExplicitVRLittleEndian
+    file_meta.TransferSyntaxUID = JPEG_BASELINE_TRANSFER_SYNTAX
 
     ds = Dataset()
     ds.file_meta = file_meta
@@ -104,7 +120,8 @@ def create_video_dataset(frames, fps, patient_id, patient_name, accession_number
     ds.RadiationSetting = "GR"
     ds.PositionerMotion = "STATIC"
     ds.KVP = ""
-    ds.LossyImageCompression = "01"  # Quelle (MP4) war bereits verlustbehaftet komprimiert
+    ds.LossyImageCompression = "01"  # MP4-Quelle und JPEG-Frames sind verlustbehaftet komprimiert
+    ds.LossyImageCompressionMethod = "ISO_10918_1"  # JPEG
 
     # Cine-Parameter
     frame_time_ms = 1000.0 / fps
@@ -127,11 +144,10 @@ def create_video_dataset(frames, fps, patient_id, patient_name, accession_number
     ds.HighBit = 7
     ds.PixelRepresentation = 0
 
-    pixel_data = b"".join(f.tobytes() for f in frames)
-    # PixelData muss gerade Byte-Länge haben (DICOM OB Padding)
-    if len(pixel_data) % 2 != 0:
-        pixel_data += b"\x00"
-    ds.PixelData = pixel_data
+    # Gekapselte Pixeldaten: ein Fragment pro Frame, Padding auf gerade Länge übernimmt encapsulate()
+    ds.PixelData = encapsulate(encode_frames_jpeg(frames, jpeg_quality))
+    ds["PixelData"].VR = "OB"
+    ds["PixelData"].is_undefined_length = True
 
     return ds
 
@@ -148,7 +164,7 @@ def send_to_pacs(ds):
     from pacs_injector import PACS_IP, PACS_PORT, PACS_AET
 
     ae = AE(ae_title=PACS_AET)
-    ae.add_requested_context(ds.file_meta.MediaStorageSOPClassUID)
+    ae.add_requested_context(ds.file_meta.MediaStorageSOPClassUID, ds.file_meta.TransferSyntaxUID)
 
     print(f"[*] Sende Video-DICOM an dcm4chee ({PACS_IP}:{PACS_PORT})...")
     assoc = ae.associate(PACS_IP, PACS_PORT, ae_title=PACS_AET)
@@ -169,6 +185,7 @@ def main():
     parser.add_argument("-o", "--output", help="Ziel-DICOM (Standard: gleicher Name mit .dcm)")
     parser.add_argument("--max-width", type=int, default=1024, help="Maximale Bildbreite in Pixeln (0 = Original)")
     parser.add_argument("--max-frames", type=int, default=0, help="Maximale Anzahl Frames (0 = alle)")
+    parser.add_argument("--jpeg-quality", type=int, default=DEFAULT_JPEG_QUALITY, help="JPEG-Qualität der Frames (1-100)")
     parser.add_argument("--patient-id", default="TEST001")
     parser.add_argument("--patient-name", default="Test^Patient")
     parser.add_argument("--accession", default="")
@@ -182,8 +199,7 @@ def main():
     print(f"[*] Lese Video: {args.input}")
     frames, fps = read_video_frames(args.input, args.max_width or None, args.max_frames or None)
     rows, cols = frames[0].shape
-    size_mb = rows * cols * len(frames) / (1024 * 1024)
-    print(f"[+] {len(frames)} Frames, {cols}x{rows} px, {fps:.2f} fps (~{size_mb:.1f} MB Pixeldaten)")
+    print(f"[+] {len(frames)} Frames, {cols}x{rows} px, {fps:.2f} fps")
 
     ds = create_video_dataset(
         frames=frames,
@@ -192,11 +208,12 @@ def main():
         patient_name=args.patient_name,
         accession_number=args.accession,
         study_instance_uid=generate_uid(),
-        description=description
+        description=description,
+        jpeg_quality=args.jpeg_quality
     )
 
     save_dataset(ds, output_path)
-    print(f"[V] DICOM gespeichert: {output_path}")
+    print(f"[V] DICOM gespeichert: {output_path} ({os.path.getsize(output_path) / (1024 * 1024):.1f} MB)")
 
     if args.send:
         send_to_pacs(ds)
