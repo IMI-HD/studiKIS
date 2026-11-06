@@ -30,7 +30,7 @@ CASES_FILE = os.path.join(SCRIPT_DIR, "cases.json")
 REPORTS_DIR = os.path.join(SCRIPT_DIR, "reports")
 # Unauffällige Standardbefunde für alle Orders ohne vorgefertigten Fall
 DEFAULT_REPORTS_FILE = os.path.join(SCRIPT_DIR, "default_reports.json")
-VIDEO_MAX_WIDTH = 1024  # Breitere MP4 werden für das Multi-Frame-DICOM auf diese Breite verkleinert
+VIDEO_MAX_WIDTH = 1024  # MP4 werden für unkomprimiertes Multi-Frame-DICOM auf diese Breite verkleinert
 
 # 2. PACS VERBINDUNGSDATEN (dcm4chee DICOM-Port, standardmäßig 11112)
 PACS_IP = "127.0.0.1"   # Da Port 11112 auf den Host weitergeleitet ist (0.0.0.0:11112->11112)
@@ -502,7 +502,7 @@ def create_png_dataset(template_file, png_path):
 def create_image_dataset(image_path):
     """
     Erzeugt das Bild-DICOM je nach Dateityp:
-    .mp4 -> Multi-Frame XA (Cine), .dcm -> fertiges DICOM übernehmen, sonst -> PNG/JPG über Vorlage.
+    .mp4 -> Multi-Frame über Vorlage, .dcm -> fertiges DICOM übernehmen, sonst -> PNG/JPG über Vorlage.
     Patienten- und Studiendaten werden danach in process_json_trigger überschrieben.
     """
     ext = os.path.splitext(image_path)[1].lower()
@@ -511,7 +511,7 @@ def create_image_dataset(image_path):
         from mp4_to_dicom import read_video_frames, create_video_dataset
         frames, fps = read_video_frames(image_path, max_width=VIDEO_MAX_WIDTH)
         print(f"[*] Video eingelesen: {len(frames)} Frames, {frames[0].shape[1]}x{frames[0].shape[0]} px, {fps:.2f} fps")
-        return create_video_dataset(frames, fps, "", "", "", generate_uid(), "")
+        return create_video_dataset(frames, fps, "", "", "", generate_uid(), "", TEMPLATE_FILE)
     if ext == '.dcm':
         return dcmread(image_path)
     return create_png_dataset(TEMPLATE_FILE, image_path)
@@ -539,10 +539,9 @@ def publish_finding(ctx, report_text, concept, ward):
 def send_to_pacs(ds, report_ds):
     """Bild und Befund-Bild per C-STORE an dcm4chee senden. Gibt True zurück, wenn beides gespeichert wurde."""
     ae = AE(ae_title=PACS_AET)
-    # Jedes Objekt wird in seiner eigenen Transfer Syntax angeboten (z.B. JPEG beim Video-DICOM)
-    ae.add_requested_context(ds.file_meta.MediaStorageSOPClassUID, ds.file_meta.TransferSyntaxUID)
-    if hasattr(report_ds, 'file_meta'):
-        ae.add_requested_context(report_ds.file_meta.MediaStorageSOPClassUID, report_ds.file_meta.TransferSyntaxUID)
+    ae.add_requested_context(ds.file_meta.MediaStorageSOPClassUID)
+    if hasattr(report_ds, 'file_meta') and report_ds.file_meta.MediaStorageSOPClassUID != ds.file_meta.MediaStorageSOPClassUID:
+        ae.add_requested_context(report_ds.file_meta.MediaStorageSOPClassUID)
 
     print(f"[*] Sende Bild und Befundbericht an dcm4chee ({PACS_IP}:{PACS_PORT})...")
     assoc = ae.associate(PACS_IP, PACS_PORT, ae_title=PACS_AET)
@@ -734,4 +733,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # sudo ~/.venv/bahmni/bin/python KIS-Projekt/scripts/pacs_injection/pacs_injector.py
+    # sudo ~/.venv/bahmni/bin/python ~/KIS-Projekt/scripts/pacs_injection/pacs_injector.py
