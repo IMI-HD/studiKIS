@@ -3,20 +3,25 @@
         "name": "Rolf Hertz - Herzinsuffizienz",
         "ward": "kardiologie",
         "dob": "1951-06-23",
+        "folder": "Rolf Hertz Bildgebung Studentenunterricht",
         "studies": [
             {
                 "procedure": ["angiogram", "angiography", "angiographie", "ventrikulografie"],
-                "file": "Ventrikulografie mit mittelgradig reduzierter LVEF.mp4",
+                "file": "Angiogram/Ventrikulografie mit mittelgradig reduzierter LVEF.mp4",
                 "description": "Ventrikulografie - mittelgradig reduzierte LVEF",
                 "report": "rolf_hertz_angiogram.txt"
             },
             {
                 "procedure": ["echocardiogra", "echokardiogra"],
+                "file": "Transthoracic echocardiogram/4-Kammer-Blick.mp4",
+                "description": "TTE - 4-Kammer-Blick",
                 "report": "rolf_hertz_echocardiogram.txt"
             },
             {
                 "procedure": ["electrocardiogra", "ekg", "ecg"],
                 "concept": "ECG Finding",
+                "file": "EKG/12-Kanal-EKG (Teil 1).png",
+                "description": "12-Kanal-EKG",
                 "report": "rolf_hertz_ecg.txt"
             }
         ]
