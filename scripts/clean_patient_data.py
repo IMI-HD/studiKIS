@@ -155,3 +155,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         target = sys.argv[1]
     delete_patient_strictly(target)
+    # sudo ~/.venv/bahmni/bin/python ~/KIS-Projekt/scripts/clean_patient_data.py <PATIENT ID>

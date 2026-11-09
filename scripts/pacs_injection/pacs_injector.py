@@ -23,14 +23,15 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 TRIGGER_DIR = "/var/lib/docker/volumes/bahmni-standard_mirth_pacs_data/_data/triggers"
 TEMPLATE_FILE = "/home/kislab/dicom_images/gesicht_roentgen.dcm"
 IMAGE_DIR = "/home/kislab/dicom_images"
-# Fall-Konfiguration (Station + Geburtsdatum -> vorgefertigte Bildgebung). Bildpfade darin relativ zu IMAGE_DIR.
+# Fall-Konfiguration (Station + Geburtsdatum -> vorgefertigte Bildgebung).
+# Bildpfad = IMAGE_DIR / "folder" des Falls / "file" der Untersuchung (eine Datei pro Untersuchung).
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CASES_FILE = os.path.join(SCRIPT_DIR, "cases.json")
 # Befundtexte der Fälle ("report" in cases.json) liegen versioniert im Repo
 REPORTS_DIR = os.path.join(SCRIPT_DIR, "reports")
 # Unauffällige Standardbefunde für alle Orders ohne vorgefertigten Fall
 DEFAULT_REPORTS_FILE = os.path.join(SCRIPT_DIR, "default_reports.json")
-VIDEO_MAX_WIDTH = 1024  # MP4 werden für unkomprimiertes Multi-Frame-DICOM auf diese Breite verkleinert
+VIDEO_EXTENSIONS = ('.mp4',)  # Videos gehen NICHT ins PACS, sondern als Formular "Video Befund" nach OpenMRS
 
 # 2. PACS VERBINDUNGSDATEN (dcm4chee DICOM-Port, standardmäßig 11112)
 PACS_IP = "127.0.0.1"   # Da Port 11112 auf den Host weitergeleitet ist (0.0.0.0:11112->11112)
@@ -502,16 +503,11 @@ def create_png_dataset(template_file, png_path):
 def create_image_dataset(image_path):
     """
     Erzeugt das Bild-DICOM je nach Dateityp:
-    .mp4 -> Multi-Frame über Vorlage, .dcm -> fertiges DICOM übernehmen, sonst -> PNG/JPG über Vorlage.
+    .dcm -> fertiges DICOM übernehmen, sonst -> PNG/JPG über Vorlage.
+    (Videos werden nicht konvertiert, siehe VIDEO_EXTENSIONS.)
     Patienten- und Studiendaten werden danach in process_json_trigger überschrieben.
     """
     ext = os.path.splitext(image_path)[1].lower()
-    if ext == '.mp4':
-        # Lazy Import: OpenCV wird nur benötigt, wenn tatsächlich ein Video verarbeitet wird
-        from mp4_to_dicom import read_video_frames, create_video_dataset
-        frames, fps = read_video_frames(image_path, max_width=VIDEO_MAX_WIDTH)
-        print(f"[*] Video eingelesen: {len(frames)} Frames, {frames[0].shape[1]}x{frames[0].shape[0]} px, {fps:.2f} fps")
-        return create_video_dataset(frames, fps, "", "", "", generate_uid(), "", TEMPLATE_FILE)
     if ext == '.dcm':
         return dcmread(image_path)
     return create_png_dataset(TEMPLATE_FILE, image_path)
@@ -524,14 +520,16 @@ def remove_trigger(file_path):
     print("[*] Trigger-Datei bereinigt. Warte auf nächsten Auftrag...")
 
 
-def publish_finding(ctx, report_text, concept, ward):
-    """Befund als Text-Observation in OpenMRS ablegen (erscheint im Clinical Dashboard)."""
+def publish_finding(ctx, report_text, concept, ward, video_path=None):
+    """Befund als Text-Observation in OpenMRS ablegen (erscheint im Clinical Dashboard).
+    Mit video_path wird das Video zusätzlich hochgeladen und im selben Encounter als
+    Formular "Video Befund" (Video + Befundtext) gespeichert."""
     if not (ctx.get("patient_uuid") and ctx.get("order_uuid")):
         print("[!] Patient/Order nicht in OpenMRS gefunden -> Befund wird nicht in OpenMRS gespeichert.")
         return
     try:
         publish_report_for_order(ctx["patient_uuid"], ctx["order_uuid"], report_text,
-                                 concept_name=concept, location_name=ward)
+                                 concept_name=concept, location_name=ward, video_path=video_path)
     except Exception as rep_err:
         print(f"[X] Befund konnte nicht in OpenMRS gespeichert werden: {rep_err}")
 
@@ -631,18 +629,28 @@ def process_json_trigger(file_path):
     if not os.path.exists(IMAGE_DIR):
         print(f"[X] FEHLER: Bildverzeichnis existiert nicht: {IMAGE_DIR}")
     elif study and study.get('file'):
-        image_path = os.path.join(IMAGE_DIR, study['file'])
+        # "folder" (Fall-Ordner) und "file" sind relativ zu IMAGE_DIR, z. B. "<Fall>/Angiogram/x.mp4"
+        image_path = os.path.join(IMAGE_DIR, case.get('folder', ''), study['file'])
     else:
         image_path = find_legacy_png(patient_name, procedure)
 
+    if image_path and not os.path.exists(image_path):
+        print(f"[!] Konfigurierte Bilddatei nicht gefunden: {image_path}")
     if not image_path or not os.path.exists(image_path):
-        # Kein Bild (z. B. EKG) -> nur Befund in OpenMRS, nichts ins PACS
+        # Kein Bild -> nur Befund in OpenMRS, nichts ins PACS
         print(f"[i] Kein Bild für Patient '{patient_name}' / Untersuchung '{procedure}' hinterlegt -> nur Befund in OpenMRS.")
         publish_finding(ctx, report_text, concept, ward)
         remove_trigger(file_path)
         return
 
     print(f"[+] Verwende Bilddatei: {image_path}")
+
+    if os.path.splitext(image_path)[1].lower() in VIDEO_EXTENSIONS:
+        # Video -> nichts ins PACS; Upload nach Bahmni + Formular "Video Befund" + Text-Befund
+        print("[*] Video erkannt -> Upload nach OpenMRS (Formular 'Video Befund'), kein PACS-Versand.")
+        publish_finding(ctx, report_text, concept, ward, video_path=image_path)
+        remove_trigger(file_path)
+        return
 
     if not os.path.exists(TEMPLATE_FILE):
         print(f"[X] FEHLER: Die Bildvorlage fehlt unter: {TEMPLATE_FILE}")
