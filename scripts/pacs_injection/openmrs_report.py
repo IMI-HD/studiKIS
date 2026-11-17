@@ -209,8 +209,19 @@ def video_title(video_path):
     return os.path.splitext(os.path.basename(video_path))[0]
 
 
+def safe_file_name(name):
+    """Bahmni appends the file name to the stored path ("...-Consultation-<uuid>__<name>.mp4"), and that
+    path is used as URL (/document_images/...). Characters like '%' or umlauts break the URL, so only
+    ASCII letters, digits, '-' and '_' are kept (the readable title is stored in the obs comment)."""
+    for src, dst in (("ä", "ae"), ("ö", "oe"), ("ü", "ue"), ("Ä", "Ae"), ("Ö", "Oe"), ("Ü", "Ue"),
+                     ("ß", "ss"), ("%", "Prozent")):
+        name = name.replace(src, dst)
+    name = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-")
+    return name[:100] or "video"
+
+
 def upload_video(patient_uuid, video_path):
-    """Upload an MP4 to Bahmni's document store; returns the relative path (e.g. "12/34-Consultation-<uuid>.mp4")
+    """Upload an MP4 to Bahmni's document store; returns the relative path (e.g. "12/34-Consultation-<uuid>__<name>.mp4")
     that is stored as the value of the video obs."""
     with open(video_path, "rb") as f:
         content = base64.b64encode(f.read()).decode("ascii")
@@ -218,7 +229,7 @@ def upload_video(patient_uuid, video_path):
         "content": content,
         "format": "mp4",
         "fileType": "video",
-        "fileName": os.path.splitext(os.path.basename(video_path))[0],
+        "fileName": safe_file_name(video_title(video_path)),
         "patientUuid": patient_uuid,
         "encounterTypeName": VIDEO_UPLOAD_ENCOUNTER_TYPE,
     }
@@ -264,7 +275,8 @@ def video_form_observations(videos, report_text, order_number):
     observations = [
         {"concept": {"uuid": VIDEO_CONCEPT_UUID},
          "value": video_url,
-         "comment": f"{order_comment(order_number)}: {title}" if title else order_comment(order_number),
+         # obs.comment is limited to 255 characters
+         "comment": (f"{order_comment(order_number)}: {title}" if title else order_comment(order_number))[:255],
          "formNamespace": "Bahmni",
          "formFieldPath": form_field_path(VIDEO_CONTROL_ID, i)}
         for i, (video_url, title) in enumerate(videos)
@@ -277,13 +289,50 @@ def video_form_observations(videos, report_text, order_number):
     return observations
 
 
+def active_visit_uuid(patient_uuid):
+    """UUID of the patient's active (not stopped) visit, or None."""
+    visits = _get("visit", patient=patient_uuid, includeInactive="false",
+                  v="custom:(uuid,stopDatetime)").get("results", [])
+    active = [v for v in visits if not v.get("stopDatetime")]
+    return active[0]["uuid"] if active else None
+
+
+def create_encounter(patient_uuid, visit_uuid, encounter_type_uuid, location_uuid):
+    """Create an empty encounter in the given visit and return its UUID."""
+    # a few seconds in the past: OpenMRS rejects encounter dates in the future (clock skew)
+    when = (datetime.datetime.now().astimezone() - datetime.timedelta(seconds=5))
+    payload = {
+        "patient": patient_uuid,
+        "visit": visit_uuid,
+        "encounterType": encounter_type_uuid,
+        "location": location_uuid,
+        "encounterDatetime": when.strftime("%Y-%m-%dT%H:%M:%S.000%z"),
+    }
+    r = session.post(f"{OPENMRS_REST_URL}/encounter", json=payload, timeout=15)
+    if not r.ok:
+        raise RuntimeError(f"creating encounter failed ({r.status_code}): {r.text[:500]}")
+    return r.json()["uuid"]
+
+
 def post_report(patient_uuid, order_number, report_text,
                 concept_name=REPORT_CONCEPT_NAME, location_name=None, extra_observations=None):
+    """Save the finding (and optional form obs) in a NEW encounter of its own.
+
+    Without an encounterUuid, bahmniencounter looks for an existing encounter of the same type
+    created by the same user in the active visit within the encounter session (default 60 min,
+    global property "bahmni.encountersession.duration"): with one match it appends the obs to
+    that encounter (mixing findings of different orders), with several it fails with
+    "More than one encounter matches the criteria" (HTTP 500). So in an active visit the encounter
+    is created first via REST and passed explicitly. Without an active visit, bahmniencounter
+    creates a new visit and encounter anyway (no matching).
+    """
+    encounter_type_uuid = lookup_uuid("encountertype", ENCOUNTER_TYPE_NAME)
+    location_uuid = resolve_location_uuid(location_name)
     payload = {
         "patientUuid": patient_uuid,
         "visitType": VISIT_TYPE,
-        "encounterTypeUuid": lookup_uuid("encountertype", ENCOUNTER_TYPE_NAME),
-        "locationUuid": resolve_location_uuid(location_name),
+        "encounterTypeUuid": encounter_type_uuid,
+        "locationUuid": location_uuid,
         "observations": [{
             "concept": {"uuid": lookup_uuid("concept", concept_name),
                         "name": concept_name},
@@ -291,8 +340,19 @@ def post_report(patient_uuid, order_number, report_text,
             "comment": order_comment(order_number),
         }, *(extra_observations or [])],
     }
+    new_encounter = None
+    visit_uuid = active_visit_uuid(patient_uuid)
+    if visit_uuid:
+        new_encounter = create_encounter(patient_uuid, visit_uuid, encounter_type_uuid, location_uuid)
+        payload["visitUuid"] = visit_uuid
+        payload["encounterUuid"] = new_encounter
     r = session.post(f"{OPENMRS_REST_URL}/bahmnicore/bahmniencounter", json=payload, timeout=30)
     if not r.ok:
+        if new_encounter:
+            try:
+                void_encounter(new_encounter)   # do not leave an empty encounter behind
+            except Exception as e:
+                log(f"note: empty encounter {new_encounter} could not be voided: {e}")
         raise RuntimeError(f"bahmniencounter failed ({r.status_code}): {r.text[:500]}")
     return r.json()
 
