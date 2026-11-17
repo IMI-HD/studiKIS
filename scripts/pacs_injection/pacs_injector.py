@@ -514,10 +514,25 @@ def create_image_dataset(image_path):
 
 
 def remove_trigger(file_path):
-    """Trigger-Datei löschen, damit sie nicht doppelt verarbeitet wird."""
-    if os.path.exists(file_path):
+    """Trigger-Datei löschen, damit sie nicht doppelt verarbeitet wird.
+    Ist sie schon weg (z. B. von einer zweiten Injektor-Instanz gelöscht), ist das kein Fehler."""
+    try:
         os.remove(file_path)
+    except FileNotFoundError:
+        print(f"[!] Trigger-Datei war bereits entfernt: {file_path}")
     print("[*] Trigger-Datei bereinigt. Warte auf nächsten Auftrag...")
+
+
+def claim_trigger(json_file):
+    """Trigger atomar übernehmen: msg_X.json -> msg_X.json.processing.
+    os.rename ist atomar, d. h. nur EIN Prozess bekommt die Datei, auch wenn versehentlich
+    mehrere Injektoren laufen. Gibt den neuen Pfad zurück oder None, wenn die Datei schon weg ist."""
+    claimed = json_file + ".processing"   # passt nicht mehr auf das glob-Muster "*.json"
+    try:
+        os.rename(json_file, claimed)
+    except FileNotFoundError:
+        return None
+    return claimed
 
 
 def publish_finding(ctx, report_text, concept, ward, video_path=None):
@@ -725,14 +740,17 @@ def main():
             print(f"[X] Hinweis: Konnte Ordner nicht erstellen (evtl. fehlende Root-Rechte): {e}")
 
     while True:
-        for json_file in glob.glob(os.path.join(TRIGGER_DIR, "*.json")):
+        for json_file in sorted(glob.glob(os.path.join(TRIGGER_DIR, "*.json"))):
+            claimed = claim_trigger(json_file)
+            if claimed is None:
+                continue  # bereits von einer anderen Instanz übernommen
             try:
-                process_json_trigger(json_file)
+                process_json_trigger(claimed)
             except Exception as e:
                 print(f"[X] Kritischer Fehler bei der Verarbeitung: {e}")
-                if os.path.exists(json_file):
+                if os.path.exists(claimed):
                     try:
-                        os.remove(json_file)
+                        os.remove(claimed)
                         print("[*] Trigger-Datei nach kritischem Fehler bereinigt.")
                     except Exception as del_err:
                         print(f"[X] Konnte Trigger-Datei nicht loeschen: {del_err}")
