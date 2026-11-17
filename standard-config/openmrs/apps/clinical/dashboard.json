@@ -32,6 +32,16 @@
                 },
                 "translationKey": "Observation Forms"
             },
+            "videoFindings": {
+                "type": "custom",
+                "displayOrder": 17,
+                "translationKey": "DASHBOARD_TITLE_VIDEO_FINDINGS_KEY",
+                "config": {
+                    "title": "DASHBOARD_TITLE_VIDEO_FINDINGS_KEY",
+                    "numberOfVisits": 10,
+                    "template": "<video-findings-dashboard section='config' patient='patient'></video-findings-dashboard>"
+                }
+            },
             "diagnosis": {
                 "translationKey": "DASHBOARD_TITLE_DIAGNOSIS_KEY",
                 "type": "diagnosis",

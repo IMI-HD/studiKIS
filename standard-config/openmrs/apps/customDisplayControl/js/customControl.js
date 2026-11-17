@@ -247,6 +247,93 @@ angular.module('bahmni.common.displaycontrol.custom')
             },
             template: '<ng-include src="contentUrl"/>'
         };
+    }]).directive('videoFindingsDashboard', ['$http', 'appService', 'spinner', function ($http, appService, spinner) {
+        // Lists the entries of form "Video Befund" (written by scripts/pacs_injection/openmrs_report.py)
+        // like the "Observation Forms" control, but labelled "<date> - <examination>", e.g.
+        // "17 Nov 2026 10:44 am - Angiogram". The examination name is the first line of the
+        // "Comments" obs ("Angiogram (ORD-123)"), the order number is the obs comment ("Order ORD-123").
+        var FORM_NAME = "Video Befund";
+        var VIDEO_CONCEPT = "MP4";
+        var TEXT_CONCEPT = "Comments";
+        var DOCUMENT_BASE_URL = "/document_images/";
+
+        var link = function ($scope) {
+            $scope.contentUrl = appService.configBaseUrl() + "/customDisplayControl/views/videoFindingsDashboard.html";
+            $scope.entries = [];
+
+            var isVideoFormObs = function (obs) {
+                return (obs.formFieldPath || "").indexOf(FORM_NAME + ".") === 0;
+            };
+
+            var examNameFromText = function (text, orderNumber) {
+                var firstLine = (text || "").split("\n")[0].trim();
+                if (!firstLine) {
+                    return "";
+                }
+                var suffix = orderNumber ? " (" + orderNumber + ")" : null;
+                if (suffix && firstLine.slice(-suffix.length) === suffix) {
+                    return firstLine.slice(0, -suffix.length).trim();
+                }
+                // Heading without order number: openmrs_report.report_heading() writes only the order number then
+                return firstLine === orderNumber ? "" : firstLine;
+            };
+
+            var buildEntries = function (observations) {
+                var byEncounter = {};
+                observations.filter(isVideoFormObs).forEach(function (obs) {
+                    var entry = byEncounter[obs.encounterUuid] = byEncounter[obs.encounterUuid] || {
+                        encounterUuid: obs.encounterUuid,
+                        dateTime: obs.encounterDateTime || obs.observationDateTime,
+                        provider: ((obs.providers || [])[0] || {}).name || "",
+                        expanded: false
+                    };
+                    var conceptName = (obs.concept || {}).name;
+                    if (conceptName === VIDEO_CONCEPT) {
+                        entry.videoUrl = obs.value ? DOCUMENT_BASE_URL + obs.value : null;
+                        var match = /^Order (.+)$/.exec(obs.comment || "");
+                        entry.orderNumber = match ? match[1] : "";
+                    } else if (conceptName === TEXT_CONCEPT) {
+                        entry.text = obs.value || "";
+                    }
+                });
+                return Object.keys(byEncounter).map(function (key) {
+                    var entry = byEncounter[key];
+                    entry.examName = examNameFromText(entry.text, entry.orderNumber);
+                    entry.dateLabel = entry.dateTime ? moment(entry.dateTime).format("DD MMM YYYY h:mm a") : "";
+                    entry.label = entry.examName ? entry.dateLabel + " – " + entry.examName : entry.dateLabel;
+                    return entry;
+                }).sort(function (a, b) {
+                    return moment(b.dateTime).valueOf() - moment(a.dateTime).valueOf();
+                });
+            };
+
+            $scope.toggle = function (entry) {
+                entry.expanded = !entry.expanded;
+            };
+
+            var params = {
+                patientUuid: $scope.patient.uuid,
+                concept: [VIDEO_CONCEPT, TEXT_CONCEPT],
+                numberOfVisits: ($scope.section && $scope.section.numberOfVisits) || 10
+            };
+            spinner.forPromise($http.get('/openmrs/ws/rest/v1/bahmnicore/observations', {
+                params: params,
+                withCredentials: true
+            }).then(function (response) {
+                $scope.entries = buildEntries(response.data || []);
+            }, function () {
+                $scope.loadError = true;
+            }));
+        };
+        return {
+            restrict: 'E',
+            link: link,
+            scope: {
+                patient: "=",
+                section: "="
+            },
+            template: '<ng-include src="contentUrl"/>'
+        };
     }]);
 
 if (!window.kasHooked) {
