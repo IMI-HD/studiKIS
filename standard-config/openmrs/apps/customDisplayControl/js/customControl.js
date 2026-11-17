@@ -251,7 +251,8 @@ angular.module('bahmni.common.displaycontrol.custom')
         // Lists the entries of form "Video Befund" (written by scripts/pacs_injection/openmrs_report.py)
         // like the "Observation Forms" control, but labelled "<date> - <examination>", e.g.
         // "17 Nov 2026 10:44 am - Angiogram". The examination name is the first line of the
-        // "Comments" obs ("Angiogram (ORD-123)"), the order number is the obs comment ("Order ORD-123").
+        // "Comments" obs ("Angiogram (ORD-123)"). There is one MP4 obs per video (formFieldPath
+        // ".../4-0", ".../4-1", ...) with the comment "Order ORD-123: <title>" (older entries: "Order ORD-123").
         var FORM_NAME = "Video Befund";
         var VIDEO_CONCEPT = "MP4";
         var TEXT_CONCEPT = "Comments";
@@ -285,19 +286,32 @@ angular.module('bahmni.common.displaycontrol.custom')
                         encounterUuid: obs.encounterUuid,
                         dateTime: obs.encounterDateTime || obs.observationDateTime,
                         provider: ((obs.providers || [])[0] || {}).name || "",
+                        videos: [],
                         expanded: false
                     };
                     var conceptName = (obs.concept || {}).name;
                     if (conceptName === VIDEO_CONCEPT) {
-                        entry.videoUrl = obs.value ? DOCUMENT_BASE_URL + obs.value : null;
-                        var match = /^Order (.+)$/.exec(obs.comment || "");
-                        entry.orderNumber = match ? match[1] : "";
+                        var match = /^Order ([^:]+?)(?::\s*(.*))?$/.exec(obs.comment || "");
+                        if (match) {
+                            entry.orderNumber = match[1];
+                        }
+                        if (obs.value) {
+                            var index = /-(\d+)$/.exec(obs.formFieldPath || "");
+                            entry.videos.push({
+                                url: DOCUMENT_BASE_URL + obs.value,
+                                title: (match && match[2]) || "",
+                                index: index ? parseInt(index[1], 10) : 0
+                            });
+                        }
                     } else if (conceptName === TEXT_CONCEPT) {
                         entry.text = obs.value || "";
                     }
                 });
                 return Object.keys(byEncounter).map(function (key) {
                     var entry = byEncounter[key];
+                    entry.videos.sort(function (a, b) {
+                        return a.index - b.index;
+                    });
                     entry.examName = examNameFromText(entry.text, entry.orderNumber);
                     entry.dateLabel = entry.dateTime ? moment(entry.dateTime).format("DD MMM YYYY h:mm a") : "";
                     entry.label = entry.examName ? entry.dateLabel + " – " + entry.examName : entry.dateLabel;

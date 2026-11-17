@@ -54,6 +54,7 @@
     "DASHBOARD_VIDEO_FINDINGS_LOAD_ERROR_KEY": "Video findings could not be loaded",
     "DASHBOARD_VIDEO_FINDINGS_ORDER_KEY": "Order",
     "DASHBOARD_VIDEO_FINDINGS_OPEN_VIDEO_KEY": "Open video in new tab",
+    "DASHBOARD_VIDEO_FINDINGS_VIDEOS_KEY": "videos",
     "DASHBOARD_TITLE_RADIOLOGY_KEY": "Radiologia",
     "DASHBOARD_TITLE_RADIOLOGY_ORDERS_KEY": "Pedidos de Radiologia",
     "DASHBOARD_TITLE_RBC": "Red Blood Cells",

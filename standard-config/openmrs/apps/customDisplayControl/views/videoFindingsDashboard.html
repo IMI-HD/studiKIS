@@ -10,6 +10,7 @@
                 <a href="" ng-click="toggle(entry)" style="cursor: pointer;">
                     <i class="fa" ng-class="entry.expanded ? 'fa-caret-down' : 'fa-caret-right'"></i>
                     {{entry.label}}
+                    <span ng-if="entry.videos.length > 1" style="color: #666;">({{entry.videos.length}} {{::"DASHBOARD_VIDEO_FINDINGS_VIDEOS_KEY" | translate}})</span>
                 </a>
                 <span style="color: #666; padding-left: 10px;">{{entry.provider}}</span>
             </div>
@@ -17,9 +18,10 @@
                 <div ng-if="entry.orderNumber" style="color: #666; margin-bottom: 6px;">
                     {{::"DASHBOARD_VIDEO_FINDINGS_ORDER_KEY" | translate}}: {{entry.orderNumber}}
                 </div>
-                <div ng-if="entry.videoUrl" style="margin-bottom: 6px;">
-                    <video controls preload="metadata" ng-src="{{entry.videoUrl}}" style="max-width: 100%; max-height: 360px;"></video>
-                    <div><a ng-href="{{entry.videoUrl}}" target="_blank">{{::"DASHBOARD_VIDEO_FINDINGS_OPEN_VIDEO_KEY" | translate}}</a></div>
+                <div ng-repeat="video in entry.videos" style="margin-bottom: 10px;">
+                    <div ng-if="video.title" style="font-weight: bold; margin-bottom: 2px;">{{video.title}}</div>
+                    <video controls preload="metadata" ng-src="{{video.url}}" style="max-width: 100%; max-height: 360px;"></video>
+                    <div><a ng-href="{{video.url}}" target="_blank">{{::"DASHBOARD_VIDEO_FINDINGS_OPEN_VIDEO_KEY" | translate}}</a></div>
                 </div>
                 <div ng-if="entry.text" style="white-space: pre-wrap;">{{entry.text}}</div>
             </div>

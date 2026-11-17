@@ -13,8 +13,8 @@ from pynetdicom import AE
 from PIL import Image, ImageDraw, ImageFont
 import requests
 import urllib3
-from openmrs_report import (publish_report_for_order, finding_exists_for_order, REPORT_CONCEPT_NAME,
-                            OPENMRS_REST_URL, OPENMRS_AUTH)
+from openmrs_report import (publish_report_for_order, finding_exists_for_order, list_videos, REPORT_CONCEPT_NAME,
+                            OPENMRS_REST_URL, OPENMRS_AUTH, VIDEO_EXTENSIONS)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -24,14 +24,18 @@ TRIGGER_DIR = "/var/lib/docker/volumes/bahmni-standard_mirth_pacs_data/_data/tri
 TEMPLATE_FILE = "/home/kislab/dicom_images/gesicht_roentgen.dcm"
 IMAGE_DIR = "/home/kislab/dicom_images"
 # Fall-Konfiguration (Station + Geburtsdatum -> vorgefertigte Bildgebung).
-# Bildpfad = IMAGE_DIR / "folder" des Falls / "file" der Untersuchung (eine Datei pro Untersuchung).
+# Bildpfad = IMAGE_DIR / "folder" des Falls / "file" der Untersuchung.
+# "file" kann eine Datei oder ein Ordner sein: bei einem Ordner werden ALLE Videos darin
+# hochgeladen (ein Formular "Video Befund" mit n Videos); enthält er keine Videos, wird das
+# erste Bild (alphabetisch) ins PACS geschickt.
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CASES_FILE = os.path.join(SCRIPT_DIR, "cases.json")
 # Befundtexte der Fälle ("report" in cases.json) liegen versioniert im Repo
 REPORTS_DIR = os.path.join(SCRIPT_DIR, "reports")
 # Unauffällige Standardbefunde für alle Orders ohne vorgefertigten Fall
 DEFAULT_REPORTS_FILE = os.path.join(SCRIPT_DIR, "default_reports.json")
-VIDEO_EXTENSIONS = ('.mp4',)  # Videos gehen NICHT ins PACS, sondern als Formular "Video Befund" nach OpenMRS
+# Videos (VIDEO_EXTENSIONS aus openmrs_report.py) gehen NICHT ins PACS, sondern als Formular "Video Befund" nach OpenMRS
+IMAGE_EXTENSIONS = ('.dcm', '.png', '.jpg', '.jpeg')
 
 # 2. PACS VERBINDUNGSDATEN (dcm4chee DICOM-Port, standardmäßig 11112)
 PACS_IP = "127.0.0.1"   # Da Port 11112 auf den Host weitergeleitet ist (0.0.0.0:11112->11112)
@@ -535,16 +539,22 @@ def claim_trigger(json_file):
     return claimed
 
 
-def publish_finding(ctx, report_text, concept, ward, video_path=None):
+def first_image_in(folder):
+    """Erstes Bild (alphabetisch) in einem Ordner, oder None."""
+    images = sorted(f for f in os.listdir(folder) if f.lower().endswith(IMAGE_EXTENSIONS))
+    return os.path.join(folder, images[0]) if images else None
+
+
+def publish_finding(ctx, report_text, concept, ward, video_paths=None):
     """Befund als Text-Observation in OpenMRS ablegen (erscheint im Clinical Dashboard).
-    Mit video_path wird das Video zusätzlich hochgeladen und im selben Encounter als
-    Formular "Video Befund" (Video + Befundtext) gespeichert."""
+    Mit video_paths werden die Videos zusätzlich hochgeladen und im selben Encounter als
+    Formular "Video Befund" (alle Videos + Befundtext) gespeichert."""
     if not (ctx.get("patient_uuid") and ctx.get("order_uuid")):
         print("[!] Patient/Order nicht in OpenMRS gefunden -> Befund wird nicht in OpenMRS gespeichert.")
         return
     try:
         publish_report_for_order(ctx["patient_uuid"], ctx["order_uuid"], report_text,
-                                 concept_name=concept, location_name=ward, video_path=video_path)
+                                 concept_name=concept, location_name=ward, video_paths=video_paths)
     except Exception as rep_err:
         print(f"[X] Befund konnte nicht in OpenMRS gespeichert werden: {rep_err}")
 
@@ -658,14 +668,31 @@ def process_json_trigger(file_path):
         remove_trigger(file_path)
         return
 
-    print(f"[+] Verwende Bilddatei: {image_path}")
+    # Ordner -> alle Videos darin; ohne Videos das erste Bild
+    video_paths = []
+    if os.path.isdir(image_path):
+        video_paths = list_videos(image_path)
+        if not video_paths:
+            folder = image_path
+            image_path = first_image_in(folder)
+            if not image_path:
+                print(f"[i] Ordner '{folder}' enthält weder Videos noch Bilder -> nur Befund in OpenMRS.")
+                publish_finding(ctx, report_text, concept, ward)
+                remove_trigger(file_path)
+                return
+    elif os.path.splitext(image_path)[1].lower() in VIDEO_EXTENSIONS:
+        video_paths = [image_path]
 
-    if os.path.splitext(image_path)[1].lower() in VIDEO_EXTENSIONS:
-        # Video -> nichts ins PACS; Upload nach Bahmni + Formular "Video Befund" + Text-Befund
-        print("[*] Video erkannt -> Upload nach OpenMRS (Formular 'Video Befund'), kein PACS-Versand.")
-        publish_finding(ctx, report_text, concept, ward, video_path=image_path)
+    if video_paths:
+        # Videos -> nichts ins PACS; Upload nach Bahmni + Formular "Video Befund" + Text-Befund
+        print(f"[*] {len(video_paths)} Video(s) erkannt -> Upload nach OpenMRS (Formular 'Video Befund'), kein PACS-Versand:")
+        for p in video_paths:
+            print(f"    - {os.path.basename(p)}")
+        publish_finding(ctx, report_text, concept, ward, video_paths=video_paths)
         remove_trigger(file_path)
         return
+
+    print(f"[+] Verwende Bilddatei: {image_path}")
 
     if not os.path.exists(TEMPLATE_FILE):
         print(f"[X] FEHLER: Die Bildvorlage fehlt unter: {TEMPLATE_FILE}")
