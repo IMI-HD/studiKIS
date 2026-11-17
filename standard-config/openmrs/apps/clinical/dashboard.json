@@ -124,7 +124,7 @@
                 }
             },
             "radiologyFinding": {
-                "translationKey": "Radiology Finding",
+                "translationKey": "DASHBOARD_TITLE_RADIOLOGY_FINDING_KEY",
                 "type": "observation",
                 "isObservation": true,
                 "displayOrder": 11,
@@ -147,7 +147,7 @@
                 "hideEmptyDisplayControl": true
             },
             "ecgFinding": {
-                "translationKey": "ECG Finding",
+                "translationKey": "DASHBOARD_TITLE_ECG_FINDING_KEY",
                 "type": "observation",
                 "isObservation": true,
                 "displayOrder": 11,

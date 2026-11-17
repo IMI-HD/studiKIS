@@ -51,7 +51,12 @@ VERIFY_SSL = False                      # Bahmni Docker uses a self-signed certi
 
 REPORT_CONCEPT_NAME = "Radiology Finding"   # default concept (dashboard section "radiologyFinding")
 ECG_CONCEPT_NAME = "ECG Finding"            # ECGs are ordered as radiology orders but shown separately
-REPORT_CONCEPTS = [REPORT_CONCEPT_NAME, ECG_CONCEPT_NAME]   # created by "setup", verified by "check"
+REPORT_CONCEPTS = [REPORT_CONCEPT_NAME, ECG_CONCEPT_NAME]
+# German names (locale "de"), shown as label when Bahmni is switched to German; added by "setup"
+GERMAN_CONCEPT_NAMES = {
+    REPORT_CONCEPT_NAME: "Radiologischer Befund",
+    ECG_CONCEPT_NAME: "EKG-Befund",
+}   # created by "setup", verified by "check"
 # Must NOT be "RADIOLOGY": the dashboard section "radiology" (documents control) loads all
 # RADIOLOGY encounters and expects every obs to be a document obs group -> UI crash.
 ENCOUNTER_TYPE_NAME = "Radiology Report"
@@ -144,6 +149,12 @@ def get_order(order_uuid):
     """Return order number and examination name of an order."""
     o = _get(f"order/{order_uuid}", v="custom:(orderNumber,concept:(display))")
     return o["orderNumber"], (o.get("concept") or {}).get("display") or ""
+
+
+def display_safe(text):
+    """OpenMRS stores '<' and '>' in free text HTML-escaped ('&lt;', '&gt;'), and Bahmni shows
+    that literally (e.g. "(&gt;3,5 mV)"). Use look-alike full-width characters instead."""
+    return text.replace("<", "\uff1c").replace(">", "\uff1e")
 
 
 def report_heading(exam_name, order_number):
@@ -268,7 +279,7 @@ def publish_report_for_order(patient_uuid, order_uuid, report_text,
     if report_exists(patient_uuid, order_number, concept_name):
         log(f"finding for order {order_number} already exists - skipped")
         return None
-    text = f"{report_heading(exam_name, order_number)}\n\n{report_text}"
+    text = display_safe(f"{report_heading(exam_name, order_number)}\n\n{report_text}")
     extra = None
     if video_path:
         extra = video_form_observations(upload_video(patient_uuid, video_path), text, order_number)
@@ -315,6 +326,23 @@ def setup_concept(concept_name):
     r.raise_for_status()
     print(f"Concept created: {concept_name} {r.json()['uuid']}")
     return r.json()["uuid"]
+
+
+def setup_german_names():
+    """Add a German fully specified name to each finding concept (if not present yet)."""
+    for concept_name, german in GERMAN_CONCEPT_NAMES.items():
+        uuid = lookup_uuid("concept", concept_name)
+        names = _get(f"concept/{uuid}/name", v="custom:(name,locale)").get("results", [])
+        if any(n.get("locale") == "de" for n in names):
+            print(f"German name already exists: {concept_name}")
+            continue
+        r = session.post(f"{OPENMRS_REST_URL}/concept/{uuid}/name",
+                         json={"name": german, "locale": "de", "localePreferred": True,
+                               "conceptNameType": "FULLY_SPECIFIED"}, timeout=15)
+        if r.ok:
+            print(f"German name added: {concept_name} -> {german}")
+        else:
+            print(f"WARNING German name for {concept_name} not added ({r.status_code}): {r.text[:200]}")
 
 
 def setup_encounter_type():
@@ -402,6 +430,7 @@ if __name__ == "__main__":
     elif cmd == "setup":
         for concept_name in REPORT_CONCEPTS:
             setup_concept(concept_name)
+        setup_german_names()
         setup_encounter_type()
         sys.exit(0 if check_config() else 1)
     elif cmd == "test" and len(sys.argv) >= 4:
