@@ -15,18 +15,22 @@ Videos (MP4) are not sent to the PACS. They are uploaded to Bahmni's document st
 (bahmnicore/visitDocument/uploadDocument) and saved in the same encounter as the text
 finding, as observations of the form "Video Befund"
 (standard-config/masterdata/configuration/bahmniforms/Video Befund_1.json):
-the video path in "MP4" and the finding text in "Comments".
+one "MP4" obs per video (formFieldPath ".../4-0", ".../4-1", ...; obs comment
+"Order ORD-123: <file name>") and the finding text once in "Comments".
+For the Bahmni form viewer to show more than one video, the MP4 control must allow
+multiple values (Form Builder: "Allow Multiple" / addMore) - see check_video_form().
 
 Usage from pacs_injector.py:
     from openmrs_report import publish_report_for_order
     publish_report_for_order(patient_uuid, order_uuid, report_text)
-    publish_report_for_order(patient_uuid, order_uuid, report_text, video_path="/path/x.mp4")
+    publish_report_for_order(patient_uuid, order_uuid, report_text, video_paths=["/path/a.mp4", "/path/b.mp4"])
 
 CLI:
     python openmrs_report.py check                                  # verify configuration
     python openmrs_report.py setup                                  # create concept + encounter type if missing, then check
     python openmrs_report.py test <patient> <order_number> [text]   # write a test finding
-    python openmrs_report.py test-video <patient> <order_number> <mp4> [text]   # test finding + "Video Befund" form
+    python openmrs_report.py test-video <patient> <order_number> <mp4|folder> [text]   # test finding + "Video Befund" form
+        <folder>: all MP4 files in it are uploaded
         <patient> may be the patient UUID or the patient identifier (e.g. GAN203006)
     python openmrs_report.py void <encounter_uuid>                  # void (soft-delete) an encounter
 """
@@ -64,10 +68,11 @@ LOCATION_NAME = "Kardiologie"           # fallback location if the order's ward 
 VISIT_TYPE = "OPD"                      # must be an existing visit type
 SET_FULFILLER_STATUS = True             # mark order as COMPLETED (OpenMRS >= 2.2)
 
-# Form "Video Befund" (values from bahmniforms/Video Befund_1.json - update them if the form
-# is republished in a new version or its controls change)
+# Form "Video Befund" (values from bahmniforms/Video Befund_1.json - update them if the
+# controls change; the Form Builder keeps control ids when a new version is published)
 VIDEO_FORM_NAME = "Video Befund"
-VIDEO_FORM_VERSION = "1"
+VIDEO_FORM_VERSION = None               # None = latest published version, or e.g. "2" to pin one
+VIDEO_EXTENSIONS = (".mp4",)
 VIDEO_CONTROL_ID = "4"                                          # obsControl "MP4"
 VIDEO_CONCEPT_UUID = "ba4f6c88-05f5-47ca-bd73-5493a38c23ed"     # MP4 (Complex, VideoUrlHandler)
 COMMENTS_CONTROL_ID = "5"                                       # obsControl "Comments"
@@ -191,6 +196,19 @@ def resolve_location_uuid(location_name):
     return lookup_uuid("location", LOCATION_NAME)
 
 
+def list_videos(path):
+    """A single video file -> [file]; a folder -> all videos in it (sorted by name)."""
+    if os.path.isdir(path):
+        return sorted(os.path.join(path, f) for f in os.listdir(path)
+                      if f.lower().endswith(VIDEO_EXTENSIONS) and os.path.isfile(os.path.join(path, f)))
+    return [path]
+
+
+def video_title(video_path):
+    """Shown per video in the dashboard section "Video-Befunde": the file name without extension."""
+    return os.path.splitext(os.path.basename(video_path))[0]
+
+
 def upload_video(patient_uuid, video_path):
     """Upload an MP4 to Bahmni's document store; returns the relative path (e.g. "12/34-Consultation-<uuid>.mp4")
     that is stored as the value of the video obs."""
@@ -216,25 +234,47 @@ def upload_video(patient_uuid, video_path):
     return url
 
 
-def form_field_path(control_id):
-    # Controls inside a section are addressed directly ("<form>.<version>/<control>-0");
-    # sections do not create obs of their own.
-    return f"{VIDEO_FORM_NAME}.{VIDEO_FORM_VERSION}/{control_id}-0"
+def video_form_versions():
+    """Published versions of form "Video Befund", highest first (cached)."""
+    if "video_form_versions" not in _cache:
+        results = _get("form", q=VIDEO_FORM_NAME, v="custom:(uuid,name,version,published)").get("results", [])
+        forms = [f for f in results if f.get("name") == VIDEO_FORM_NAME and f.get("published")]
+        _cache["video_form_versions"] = sorted(forms, key=lambda f: int(f.get("version") or 0), reverse=True)
+    return _cache["video_form_versions"]
 
 
-def video_form_observations(video_url, report_text, order_number):
-    """Observations of the form "Video Befund": video path + finding text."""
-    return [
+def video_form_version():
+    if VIDEO_FORM_VERSION:
+        return VIDEO_FORM_VERSION
+    forms = video_form_versions()
+    if not forms:
+        raise LookupError(f"form '{VIDEO_FORM_NAME}' is not published")
+    return forms[0]["version"]
+
+
+def form_field_path(control_id, index=0):
+    # Controls inside a section are addressed directly ("<form>.<version>/<control>-<n>");
+    # sections do not create obs of their own. <n> numbers the values of an "addMore" control.
+    return f"{VIDEO_FORM_NAME}.{video_form_version()}/{control_id}-{index}"
+
+
+def video_form_observations(videos, report_text, order_number):
+    """Observations of the form "Video Befund": one MP4 obs per video + the finding text once.
+    videos: list of (document store path, title)."""
+    observations = [
         {"concept": {"uuid": VIDEO_CONCEPT_UUID},
          "value": video_url,
-         "comment": order_comment(order_number),
+         "comment": f"{order_comment(order_number)}: {title}" if title else order_comment(order_number),
          "formNamespace": "Bahmni",
-         "formFieldPath": form_field_path(VIDEO_CONTROL_ID)},
+         "formFieldPath": form_field_path(VIDEO_CONTROL_ID, i)}
+        for i, (video_url, title) in enumerate(videos)
+    ]
+    observations.append(
         {"concept": {"uuid": COMMENTS_CONCEPT_UUID},
          "value": report_text,
          "formNamespace": "Bahmni",
-         "formFieldPath": form_field_path(COMMENTS_CONTROL_ID)},
-    ]
+         "formFieldPath": form_field_path(COMMENTS_CONTROL_ID)})
+    return observations
 
 
 def post_report(patient_uuid, order_number, report_text,
@@ -266,33 +306,39 @@ def mark_order_completed(order_uuid):
 
 
 def publish_report_for_order(patient_uuid, order_uuid, report_text,
-                             concept_name=REPORT_CONCEPT_NAME, location_name=None, video_path=None):
+                             concept_name=REPORT_CONCEPT_NAME, location_name=None, video_paths=None):
     """
     Main entry point for pacs_injector.py (patient and order UUID already known).
     concept_name: REPORT_CONCEPT_NAME (default) or e.g. ECG_CONCEPT_NAME.
     location_name: location of the finding (e.g. the order's ward); falls back to LOCATION_NAME.
-    video_path: optional MP4; uploaded and saved in the same encounter as form "Video Befund"
-                (video + finding text).
+    video_paths: optional list of MP4 files (a single path is accepted too); all are uploaded and
+                 saved in the same encounter as form "Video Befund" (videos + finding text).
     Returns the encounter UUID, or None if a finding for this order already exists.
     """
+    if isinstance(video_paths, str):
+        video_paths = [video_paths]
+    video_paths = list(video_paths or [])
     order_number, exam_name = get_order(order_uuid)
     if report_exists(patient_uuid, order_number, concept_name):
         log(f"finding for order {order_number} already exists - skipped")
         return None
     text = display_safe(f"{report_heading(exam_name, order_number)}\n\n{report_text}")
     extra = None
-    if video_path:
-        extra = video_form_observations(upload_video(patient_uuid, video_path), text, order_number)
+    if video_paths:
+        version = video_form_version()   # fail before uploading anything if the form is missing
+        videos = [(upload_video(patient_uuid, p), video_title(p)) for p in video_paths]
+        extra = video_form_observations(videos, text, order_number)
+        log(f"{len(videos)} video(s) -> form '{VIDEO_FORM_NAME}' v{version}")
     result = post_report(patient_uuid, order_number, text, concept_name, location_name, extra)
     if SET_FULFILLER_STATUS:
         mark_order_completed(order_uuid)
     enc = result.get("encounterUuid")
-    form_note = f" + form '{VIDEO_FORM_NAME}'" if video_path else ""
+    form_note = f" + form '{VIDEO_FORM_NAME}' ({len(video_paths)} video(s))" if video_paths else ""
     log(f"{concept_name}{form_note} '{exam_name}' for order {order_number} saved in OpenMRS (encounter {enc})")
     return enc
 
 
-def publish_report(patient, order_number, report_text=None, video_path=None):
+def publish_report(patient, order_number, report_text=None, video_paths=None):
     """Variant with patient UUID/identifier and order number (used by the CLI test)."""
     patient_uuid = resolve_patient_uuid(patient)
     order = find_order(patient_uuid, order_number)
@@ -302,7 +348,7 @@ def publish_report(patient, order_number, report_text=None, video_path=None):
         report_text = (f"Examination: {label}\nDate: {now}\n\n"
                        "Findings: Test finding written by openmrs_report.py.\n\n"
                        "Impression: Test only.")
-    return publish_report_for_order(patient_uuid, order["uuid"], report_text, video_path=video_path)
+    return publish_report_for_order(patient_uuid, order["uuid"], report_text, video_paths=video_paths)
 
 
 # --------------------------------------------------------------------------
@@ -397,20 +443,23 @@ def check_config():
 
 
 def check_video_form():
-    """Verify that form "Video Befund" is published in the configured version and still uses the configured concepts."""
+    """Verify that form "Video Befund" is published (configured or latest version) and still uses
+    the configured concepts. Whether the MP4 control allows multiple values ("Allow Multiple")
+    cannot be read via REST - check it in the Form Builder."""
     try:
-        results = _get("form", q=VIDEO_FORM_NAME, v="custom:(uuid,name,version,published)").get("results", [])
+        forms = video_form_versions()
     except requests.RequestException as e:
         print(f"MISSING form          {VIDEO_FORM_NAME} (lookup failed: {e})")
         return False
-    forms = [f for f in results if f.get("name") == VIDEO_FORM_NAME and f.get("version") == VIDEO_FORM_VERSION]
+    if VIDEO_FORM_VERSION:
+        forms = [f for f in forms if f.get("version") == VIDEO_FORM_VERSION]
     if not forms:
-        print(f"MISSING form          {VIDEO_FORM_NAME} version {VIDEO_FORM_VERSION}")
+        print(f"MISSING form          {VIDEO_FORM_NAME} (published version {VIDEO_FORM_VERSION or 'any'})")
         return False
     form = forms[0]
-    ok = bool(form.get("published"))
-    print(f"{'OK     ' if ok else 'WARNING'} form          {VIDEO_FORM_NAME} v{VIDEO_FORM_VERSION:16} {form['uuid']}"
-          f"{'' if ok else ' (not published)'}")
+    ok = True
+    version = f"v{form['version']}"
+    print(f"OK      form          {VIDEO_FORM_NAME} {version:15} {form['uuid']}")
     for control_id, concept_uuid, label in [(VIDEO_CONTROL_ID, VIDEO_CONCEPT_UUID, "video"),
                                             (COMMENTS_CONTROL_ID, COMMENTS_CONCEPT_UUID, "comments")]:
         try:
@@ -438,7 +487,10 @@ if __name__ == "__main__":
         publish_report(sys.argv[2], sys.argv[3], text)
     elif cmd == "test-video" and len(sys.argv) >= 5:
         text = sys.argv[5] if len(sys.argv) >= 6 else None
-        publish_report(sys.argv[2], sys.argv[3], text, video_path=sys.argv[4])
+        videos = list_videos(sys.argv[4])
+        if not videos:
+            sys.exit(f"no video files in {sys.argv[4]}")
+        publish_report(sys.argv[2], sys.argv[3], text, video_paths=videos)
     elif cmd == "void" and len(sys.argv) >= 3:
         void_encounter(sys.argv[2])
     else:

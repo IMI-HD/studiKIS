@@ -7,14 +7,14 @@
         "studies": [
             {
                 "procedure": ["angiogram", "angiography", "angiographie", "ventrikulografie"],
-                "file": "Angiogram/Ventrikulografie mit mittelgradig reduzierter LVEF.mp4",
-                "description": "Ventrikulografie - mittelgradig reduzierte LVEF",
+                "file": "Angiogram",
+                "description": "Koronarangiografie + Ventrikulografie",
                 "report": "rolf_hertz_angiogram.txt"
             },
             {
                 "procedure": ["echocardiogra", "echokardiogra"],
-                "file": "Transthoracic echocardiogram/4-Kammer-Blick.mp4",
-                "description": "TTE - 4-Kammer-Blick",
+                "file": "Transthoracic echocardiogram",
+                "description": "TTE",
                 "report": "rolf_hertz_echocardiogram.txt"
             },
             {
