@@ -10,10 +10,15 @@ from pydicom.dataset import Dataset, FileMetaDataset
 from pydicom.sequence import Sequence
 from pydicom.uid import generate_uid, ExplicitVRLittleEndian
 from pynetdicom import AE
+try:
+    from pynetdicom import DEFAULT_TRANSFER_SYNTAXES
+except ImportError:   # ältere pynetdicom-Versionen
+    DEFAULT_TRANSFER_SYNTAXES = ["1.2.840.10008.1.2", "1.2.840.10008.1.2.1",
+                                 "1.2.840.10008.1.2.1.99", "1.2.840.10008.1.2.2"]
 from PIL import Image, ImageDraw, ImageFont
 import requests
 import urllib3
-from openmrs_report import (publish_report_for_order, finding_exists_for_order, list_videos, REPORT_CONCEPT_NAME,
+from openmrs_report import (publish_report_for_order, finding_exists_for_order, REPORT_CONCEPT_NAME,
                             OPENMRS_REST_URL, OPENMRS_AUTH, VIDEO_EXTENSIONS)
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -25,9 +30,10 @@ TEMPLATE_FILE = "/home/kislab/dicom_images/gesicht_roentgen.dcm"
 IMAGE_DIR = "/home/kislab/dicom_images"
 # Fall-Konfiguration (Station + Geburtsdatum -> vorgefertigte Bildgebung).
 # Bildpfad = IMAGE_DIR / "folder" des Falls / "file" der Untersuchung.
-# "file" kann eine Datei oder ein Ordner sein: bei einem Ordner werden ALLE Videos darin
-# hochgeladen (ein Formular "Video Befund" mit n Videos); enthält er keine Videos, wird das
-# erste Bild (alphabetisch) ins PACS geschickt.
+# "file" kann eine Datei oder ein Ordner sein. Bei einem Ordner werden ALLE Dateien darin verwendet
+# (alphabetisch sortiert):
+#   - Videos -> ein Formular "Video Befund" mit n Videos in OpenMRS (nicht ins PACS)
+#   - Bilder -> eine DICOM-Serie mit n Bildern (InstanceNumber 1..n) im PACS, plus Befundbericht als 2. Serie
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CASES_FILE = os.path.join(SCRIPT_DIR, "cases.json")
 # Befundtexte der Fälle ("report" in cases.json) liegen versioniert im Repo
@@ -539,10 +545,50 @@ def claim_trigger(json_file):
     return claimed
 
 
-def first_image_in(folder):
-    """Erstes Bild (alphabetisch) in einem Ordner, oder None."""
-    images = sorted(f for f in os.listdir(folder) if f.lower().endswith(IMAGE_EXTENSIONS))
-    return os.path.join(folder, images[0]) if images else None
+def collect_media(path):
+    """Liefert (videos, images) für eine Datei oder einen Ordner (alphabetisch sortiert).
+    Andere Dateien im Ordner (z. B. .txt) werden ignoriert. Eine einzelne Datei, die kein Video ist,
+    gilt wie bisher als Bild."""
+    if os.path.isdir(path):
+        files = [os.path.join(path, f) for f in sorted(os.listdir(path))]
+        files = [f for f in files if os.path.isfile(f)]
+        videos = [f for f in files if f.lower().endswith(VIDEO_EXTENSIONS)]
+        images = [f for f in files if f.lower().endswith(IMAGE_EXTENSIONS)]
+        return videos, images
+    if path.lower().endswith(VIDEO_EXTENSIONS):
+        return [path], []
+    return [], [path]
+
+
+def build_image_datasets(image_paths, study_uid, patient_id, patient_name, accession_number, dob,
+                         procedure, description, report_text):
+    """Alle Bilder als EINE Serie (gemeinsame SeriesInstanceUID, InstanceNumber 1..n) in der Studie
+    study_uid. Oviyam zeigt sie dann als eine Serie mit n Bildern zum Durchblättern."""
+    series_uid = generate_uid()
+    datasets = []
+    for number, image_path in enumerate(image_paths, start=1):
+        ds = create_image_dataset(image_path)
+        # Bild-Metadaten mit den echten Bahmni-Werten überschreiben
+        ds.PatientID = patient_id
+        ds.PatientName = patient_name if patient_name else "Patient^Bahmni"
+        ds.AccessionNumber = accession_number
+        if dob:
+            ds.PatientBirthDate = normalize_dob(dob)
+        ds.StudyInstanceUID = study_uid
+        ds.SeriesInstanceUID = series_uid
+        ds.SOPInstanceUID = generate_uid()
+        if hasattr(ds, 'file_meta'):
+            ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+        ds.SeriesNumber = 1
+        ds.InstanceNumber = number
+        ds.StudyDescription = f"Radiology Order - {procedure}" if procedure else "Radiology Order"
+        ds.SeriesDescription = description or (f"Roentgen - {procedure}" if procedure else "Roentgenbild")
+        ds.SpecificCharacterSet = "ISO_IR 192"
+        # Befundtext auch direkt am Bild als ImageComment & StudyComment hinterlegen
+        ds.ImageComments = report_text
+        ds.StudyComments = report_text
+        datasets.append(ds)
+    return datasets
 
 
 def publish_finding(ctx, report_text, concept, ward, video_paths=None):
@@ -559,14 +605,29 @@ def publish_finding(ctx, report_text, concept, ward, video_paths=None):
         print(f"[X] Befund konnte nicht in OpenMRS gespeichert werden: {rep_err}")
 
 
-def send_to_pacs(ds, report_ds):
-    """Bild und Befund-Bild per C-STORE an dcm4chee senden. Gibt True zurück, wenn beides gespeichert wurde."""
-    ae = AE(ae_title=PACS_AET)
-    ae.add_requested_context(ds.file_meta.MediaStorageSOPClassUID)
-    if hasattr(report_ds, 'file_meta') and report_ds.file_meta.MediaStorageSOPClassUID != ds.file_meta.MediaStorageSOPClassUID:
-        ae.add_requested_context(report_ds.file_meta.MediaStorageSOPClassUID)
+def sop_class_of(ds):
+    meta = getattr(ds, 'file_meta', None)
+    return getattr(meta, 'MediaStorageSOPClassUID', None) or ds.SOPClassUID
 
-    print(f"[*] Sende Bild und Befundbericht an dcm4chee ({PACS_IP}:{PACS_PORT})...")
+
+def send_to_pacs(image_datasets, report_ds):
+    """Alle Bilder und das Befund-Bild in EINER Association per C-STORE an dcm4chee senden.
+    Gibt True zurück, wenn alles gespeichert wurde."""
+    ae = AE(ae_title=PACS_AET)
+    all_datasets = list(image_datasets) + [report_ds]
+    requested = set()
+    for d in all_datasets:
+        sop_class = sop_class_of(d)
+        if sop_class not in requested:
+            requested.add(sop_class)
+            ae.add_requested_context(sop_class)   # Standard-Transfer-Syntaxen (unkomprimiert)
+        # Fertige .dcm-Dateien können komprimiert sein -> zusätzlich ihre eigene Transfer-Syntax anbieten
+        ts = getattr(getattr(d, 'file_meta', None), 'TransferSyntaxUID', None)
+        if ts and ts not in DEFAULT_TRANSFER_SYNTAXES and (sop_class, ts) not in requested:
+            requested.add((sop_class, ts))
+            ae.add_requested_context(sop_class, ts)
+
+    print(f"[*] Sende {len(image_datasets)} Bild(er) und Befundbericht an dcm4chee ({PACS_IP}:{PACS_PORT})...")
     assoc = ae.associate(PACS_IP, PACS_PORT, ae_title=PACS_AET)
 
     if not assoc.is_established:
@@ -579,19 +640,22 @@ def send_to_pacs(ds, report_ds):
             print(f"    Grund: Kein TCP-Verbindungsaufbau zu {PACS_IP}:{PACS_PORT} möglich.")
         return False
 
-    status_img = assoc.send_c_store(ds)
-    img_success = hasattr(status_img, 'Status') and status_img.Status == 0x0000
-    print(f"[{'V' if img_success else 'X'}] Bild übertragen (Status: {hex(status_img.Status) if hasattr(status_img, 'Status') else status_img})")
+    def store(d, label):
+        status = assoc.send_c_store(d)
+        ok = hasattr(status, 'Status') and status.Status == 0x0000
+        print(f"[{'V' if ok else 'X'}] {label} übertragen (Status: {hex(status.Status) if hasattr(status, 'Status') else status})")
+        return ok
 
-    status_rep = assoc.send_c_store(report_ds)
-    rep_success = hasattr(status_rep, 'Status') and status_rep.Status == 0x0000
-    print(f"[{'V' if rep_success else 'X'}] Befundbericht übertragen (Status: {hex(status_rep.Status) if hasattr(status_rep, 'Status') else status_rep})")
-
-    assoc.release()
     # Hinweis: Früher stand hier (img_success or status_img) - das war immer wahr,
     # weil ein pydicom-Dataset als Objekt "truthy" ist. Jetzt zählt nur Status 0x0000.
+    img_success = True
+    for number, d in enumerate(image_datasets, start=1):
+        img_success = store(d, f"Bild {number}/{len(image_datasets)}") and img_success
+    rep_success = store(report_ds, "Befundbericht")
+
+    assoc.release()
     if img_success and rep_success:
-        print("[V] ERFOLG: Bild und Befundbericht im PACS gespeichert!")
+        print(f"[V] ERFOLG: {len(image_datasets)} Bild(er) und Befundbericht im PACS gespeichert!")
         return True
     print("[X] Übertragung ins PACS unvollständig.")
     return False
@@ -668,68 +732,46 @@ def process_json_trigger(file_path):
         remove_trigger(file_path)
         return
 
-    # Ordner -> alle Videos darin; ohne Videos das erste Bild
-    video_paths = []
-    if os.path.isdir(image_path):
-        video_paths = list_videos(image_path)
-        if not video_paths:
-            folder = image_path
-            image_path = first_image_in(folder)
-            if not image_path:
-                print(f"[i] Ordner '{folder}' enthält weder Videos noch Bilder -> nur Befund in OpenMRS.")
-                publish_finding(ctx, report_text, concept, ward)
-                remove_trigger(file_path)
-                return
-    elif os.path.splitext(image_path)[1].lower() in VIDEO_EXTENSIONS:
-        video_paths = [image_path]
-
+    # Datei oder Ordner -> Videos (Formular in OpenMRS) und Bilder (eine Serie im PACS)
+    video_paths, image_paths = collect_media(image_path)
+    if not video_paths and not image_paths:
+        print(f"[i] Ordner '{image_path}' enthält weder Videos noch Bilder -> nur Befund in OpenMRS.")
+        publish_finding(ctx, report_text, concept, ward)
+        remove_trigger(file_path)
+        return
     if video_paths:
-        # Videos -> nichts ins PACS; Upload nach Bahmni + Formular "Video Befund" + Text-Befund
-        print(f"[*] {len(video_paths)} Video(s) erkannt -> Upload nach OpenMRS (Formular 'Video Befund'), kein PACS-Versand:")
+        print(f"[*] {len(video_paths)} Video(s) -> Upload nach OpenMRS (Formular 'Video Befund'), kein PACS-Versand:")
         for p in video_paths:
             print(f"    - {os.path.basename(p)}")
+
+    if not image_paths:
+        # Nur Videos -> nichts ins PACS; Upload nach Bahmni + Formular "Video Befund" + Text-Befund
         publish_finding(ctx, report_text, concept, ward, video_paths=video_paths)
         remove_trigger(file_path)
         return
 
-    print(f"[+] Verwende Bilddatei: {image_path}")
+    print(f"[+] {len(image_paths)} Bild(er) -> eine Serie im PACS:")
+    for p in image_paths:
+        print(f"    - {os.path.basename(p)}")
 
     if not os.path.exists(TEMPLATE_FILE):
         print(f"[X] FEHLER: Die Bildvorlage fehlt unter: {TEMPLATE_FILE}")
         remove_trigger(file_path)
         return
 
-    print(f"[*] Erzeuge Bild-DICOM und manipuliere DICOM-Header...")
+    # GEMEINSAME StudyInstanceUID generieren:
+    # Das ist das Herzstueck, damit Bilder und Befund in derselben Studie in Oviyam2 erscheinen!
+    shared_study_uid = generate_uid()
+
+    print(f"[*] Erzeuge Bild-DICOMs und manipuliere DICOM-Header...")
     try:
-        ds = create_image_dataset(image_path)
+        image_datasets = build_image_datasets(
+            image_paths, shared_study_uid, patient_id, patient_name, accession_number, dob,
+            procedure, (study or {}).get('description'), report_text)
     except Exception as img_err:
         print(f"[X] FEHLER bei der Bild-Konvertierung: {img_err}")
         remove_trigger(file_path)
         return
-
-    # GEMEINSAME StudyInstanceUID generieren:
-    # Das ist das Herzstueck, damit Bild und Befund in derselben Studie in Oviyam2 erscheinen!
-    shared_study_uid = generate_uid()
-
-    # Bild-Metadaten mit den echten Bahmni-Werten überschreiben
-    ds.PatientID = patient_id
-    ds.PatientName = patient_name if patient_name else "Patient^Bahmni"
-    ds.AccessionNumber = accession_number
-    if dob:
-        ds.PatientBirthDate = normalize_dob(dob)
-    ds.StudyInstanceUID = shared_study_uid
-    ds.SeriesInstanceUID = generate_uid()
-    ds.SOPInstanceUID = generate_uid()
-    if hasattr(ds, 'file_meta'):
-        ds.file_meta.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
-    ds.SeriesNumber = 1
-    ds.InstanceNumber = 1
-    ds.StudyDescription = f"Radiology Order - {procedure}" if procedure else "Radiology Order"
-    ds.SeriesDescription = (study or {}).get('description') or (f"Roentgen - {procedure}" if procedure else "Roentgenbild")
-    ds.SpecificCharacterSet = "ISO_IR 192"
-    # Befundtext auch direkt am Bild als ImageComment & StudyComment hinterlegen
-    ds.ImageComments = report_text
-    ds.StudyComments = report_text
 
     # Befundbericht als darstellbares Dokument-Bild mit kopierbarem ImageComments-Tag erzeugen
     report_ds = create_report_image_dataset(
@@ -742,9 +784,9 @@ def process_json_trigger(file_path):
         procedure=procedure
     )
 
-    # 4. Ins PACS senden; Befund in OpenMRS nur, wenn die Bilder wirklich gespeichert wurden
-    if send_to_pacs(ds, report_ds):
-        publish_finding(ctx, report_text, concept, ward)
+    # 4. Ins PACS senden; Befund in OpenMRS (ggf. mit Videos) nur, wenn ALLE Bilder gespeichert wurden
+    if send_to_pacs(image_datasets, report_ds):
+        publish_finding(ctx, report_text, concept, ward, video_paths=video_paths or None)
     else:
         print("[X] Befund wird nicht an OpenMRS gesendet, da die Bilder fehlen.")
 

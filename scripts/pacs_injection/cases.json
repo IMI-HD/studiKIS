@@ -20,7 +20,7 @@
             {
                 "procedure": ["electrocardiogra", "ekg", "ecg"],
                 "concept": "ECG Finding",
-                "file": "EKG/12-Kanal-EKG (Teil 1).png",
+                "file": "EKG",
                 "description": "12-Kanal-EKG",
                 "report": "rolf_hertz_ecg.txt"
             }
