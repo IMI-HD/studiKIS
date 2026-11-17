@@ -1,0 +1,28 @@
+<section class="dashboard-section">
+    <h2 class="section-title">{{ section.title | titleTranslate }}</h2>
+
+    <div ng-if="loadError" class="placeholder-text">{{::"DASHBOARD_VIDEO_FINDINGS_LOAD_ERROR_KEY" | translate}}</div>
+    <div ng-if="!loadError && entries.length === 0" class="placeholder-text">{{::"DASHBOARD_VIDEO_FINDINGS_EMPTY_KEY" | translate}}</div>
+
+    <ul ng-if="entries.length > 0" class="form-field" style="font-size: 14px;">
+        <li ng-repeat="entry in entries track by entry.encounterUuid" style="padding: 4px 0; border-bottom: 1px solid #eee;">
+            <div style="display: flex; justify-content: space-between; align-items: baseline;">
+                <a href="" ng-click="toggle(entry)" style="cursor: pointer;">
+                    <i class="fa" ng-class="entry.expanded ? 'fa-caret-down' : 'fa-caret-right'"></i>
+                    {{entry.label}}
+                </a>
+                <span style="color: #666; padding-left: 10px;">{{entry.provider}}</span>
+            </div>
+            <div ng-if="entry.expanded" style="padding: 8px 0 4px 14px;">
+                <div ng-if="entry.orderNumber" style="color: #666; margin-bottom: 6px;">
+                    {{::"DASHBOARD_VIDEO_FINDINGS_ORDER_KEY" | translate}}: {{entry.orderNumber}}
+                </div>
+                <div ng-if="entry.videoUrl" style="margin-bottom: 6px;">
+                    <video controls preload="metadata" ng-src="{{entry.videoUrl}}" style="max-width: 100%; max-height: 360px;"></video>
+                    <div><a ng-href="{{entry.videoUrl}}" target="_blank">{{::"DASHBOARD_VIDEO_FINDINGS_OPEN_VIDEO_KEY" | translate}}</a></div>
+                </div>
+                <div ng-if="entry.text" style="white-space: pre-wrap;">{{entry.text}}</div>
+            </div>
+        </li>
+    </ul>
+</section>
