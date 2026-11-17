@@ -298,7 +298,8 @@ angular.module('bahmni.common.displaycontrol.custom')
                         if (obs.value) {
                             var index = /-(\d+)$/.exec(obs.formFieldPath || "");
                             entry.videos.push({
-                                url: DOCUMENT_BASE_URL + obs.value,
+                                // encodeURI: older uploads may contain '%' or umlauts in the file name
+                                url: DOCUMENT_BASE_URL + encodeURI(obs.value),
                                 title: (match && match[2]) || "",
                                 index: index ? parseInt(index[1], 10) : 0
                             });
